@@ -364,3 +364,29 @@ func TestPanelFilterChipShowsOnlyLinks(t *testing.T) {
 		t.Errorf("next tab: %q", f.tt.Texts())
 	}
 }
+
+func TestPanelArrowsSwitchFilterOnlyWhenSearchEmpty(t *testing.T) {
+	f := newPanelFixture(t, "plain words")
+	f.a.search.Focus()
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyRight)
+	f.tt.Frame()
+	if f.a.tab != 1 || !f.tt.HasText("Nothing pinned") {
+		t.Fatalf("→ from All: tab %d, %q", f.a.tab, f.tt.Texts())
+	}
+	f.tt.Key(0, ui.KeyLeft)
+	f.tt.Key(0, ui.KeyLeft) // wraps from All to Snippets
+	f.tt.Frame()
+	if f.a.tab != tabSnippets {
+		t.Fatalf("← wrap: tab %d", f.a.tab)
+	}
+	f.tt.Key(0, ui.KeyRight) // back to All
+	f.tt.Frame()
+	f.tt.Type("pl")
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyLeft)
+	f.tt.Frame()
+	if f.a.tab != 0 || f.a.query != "pl" {
+		t.Errorf("← with text switched filter: tab %d, query %q", f.a.tab, f.a.query)
+	}
+}

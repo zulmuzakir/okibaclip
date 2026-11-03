@@ -189,15 +189,24 @@ func (a *app) view(c *ui.Context) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Row(c).Padding(14, 16).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Icon(c, iconSearch).FontSize(16).TextColor(t.TextMuted)
-			// The field takes Enter before the panel's shortcuts see it.
+			// The field takes Enter, and ←/→ while empty, before the panel's shortcuts see them.
 			in := ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(16).
 				Placeholder("Search clipboard…").Label("Search clipboard").
 				OnTextKey(func(k ui.TextKey) bool {
-					if k.Key != ui.KeyEnter {
-						return false
+					switch {
+					case k.Key == ui.KeyEnter:
+						a.copyChosen(k.Mods&ui.Shift != 0)
+						return true
+					case k.Mods == 0 && (k.Key == ui.KeyLeft || k.Key == ui.KeyRight) && k.Text() == "":
+						// An empty field has no caret to move: the arrows switch filters.
+						if k.Key == ui.KeyLeft {
+							a.setTab(a.tab - 1)
+						} else {
+							a.setTab(a.tab + 1)
+						}
+						return true
 					}
-					a.copyChosen(k.Mods&ui.Shift != 0)
-					return true
+					return false
 				})
 			if in.Changed() {
 				a.chosen, a.chosenSnippet = 0, 0
@@ -524,10 +533,14 @@ func (a *app) syntaxHelp(c *ui.Context) {
 // hintSpans is the footer's key hints, each key as a keycap.
 func (a *app) hintSpans(t *ui.Theme) []ui.Span {
 	cm := cmdSym()
-	pairs := [][2]string{{"↵", "Copy"}, {"⇧↵", "Plain"}, {cm + "P", "Pin"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
+	filter := [2]string{"←→", "Filter"}
+	if a.query != "" {
+		filter[0] = keys("Ctrl+Tab")
+	}
+	pairs := [][2]string{{"↵", "Copy"}, {"⇧↵", "Plain"}, filter, {cm + "P", "Pin"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
 	switch {
 	case a.tab == tabSnippets:
-		pairs = [][2]string{{"↵", "Copy"}, {cm + "N", "New"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
+		pairs = [][2]string{{"↵", "Copy"}, filter, {cm + "N", "New"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
 	case a.selected.Len() > 1:
 		pairs[0][1] = "Copy merged"
 	}
