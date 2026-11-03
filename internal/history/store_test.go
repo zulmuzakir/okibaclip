@@ -1,17 +1,23 @@
 package history_test
 
 import (
-	"slices"
-
 	"context"
+	"fmt"
 	"os"
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"pastello/internal/history"
+	"pastello/internal/history/historytest"
+	"pastello/internal/search"
 )
+
+// query parses s as typed in the panel, with relative dates from T0.
+func query(s string) search.Query { return search.Parse(s, historytest.T0) }
 
 func TestStoreFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -54,13 +60,91 @@ func TestSearchIsCaseInsensitiveUnicode(t *testing.T) {
 	s := historytest.NewStore(t)
 	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "ÄBC def"}, historytest.T0)
 	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "other"}, historytest.T0.Add(time.Second))
-	list, err := s.List(context.Background(), history.Filter{Tab: "all", Query: "äb"})
+	list, err := s.List(context.Background(), history.Filter{Tab: "all", Query: query("äb")})
 	if err != nil || !slices.Equal(historytest.Texts(list), []string{"ÄBC def"}) {
 		t.Errorf("got %v, %v", historytest.Texts(list), err)
 	}
-	list, _ = s.List(context.Background(), history.Filter{Tab: "all", Query: "ÄBC"})
+	list, _ = s.List(context.Background(), history.Filter{Tab: "all", Query: query("ÄBC")})
 	if len(list) != 1 {
 		t.Errorf("upper-case query: %v", historytest.Texts(list))
+	}
+}
+
+func TestListSearch(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	at := func(min int) time.Time { return historytest.T0.Add(time.Duration(min) * time.Minute) }
+	// Newest last: without search words, List returns them newest first.
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "push to git"}, at(0))
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "git push origin main"}, at(1))
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "gadget input pushing"}, at(2))
+	historytest.Add(t, s, history.Capture{Kind: history.KindLink, Text: "https://github.com/push"}, at(3))
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: strings.Repeat("x", 5000) + " needle"}, at(4))
+	if err := s.SetPinned(ctx, mustID(t, s, "push to git"), true); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("x", 4000) // what a row holds of the needle text
+	for _, tc := range []struct {
+		q    string
+		want []string
+	}{
+		// Every word, in any order; whole-word matches before partial ones,
+		// then pinned, then newest. "gadget input" is too loose a fuzzy "git".
+		{"git push", []string{"push to git", "git push origin main", "https://github.com/push"}},
+		{`"git push"`, []string{"git push origin main"}},
+		{"gtpsh", []string{"git push origin main"}}, // fuzzy: letters in order, close together
+		{"push type:link", []string{"https://github.com/push"}},
+		{"push is:unpinned type:text", []string{"git push origin main", "gadget input pushing"}},
+		{"is:pinned", []string{"push to git"}},
+		{"after:2026-01-01", nil},
+		{"push before:" + at(2).Format("2006-01-02"), nil}, // the start of T0's day
+		{"needle", []string{long}},                         // found past the start of the text a row holds
+		{"zzz", nil},
+	} {
+		list, err := s.List(ctx, history.Filter{Tab: "all", Query: query(tc.q)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := historytest.Texts(list); !slices.Equal(got, tc.want) {
+			t.Errorf("%q: got %.60q, want %.60q", tc.q, got, tc.want)
+		}
+	}
+}
+
+func mustID(t *testing.T, s *history.Store, text string) int64 {
+	t.Helper()
+	l, err := s.List(context.Background(), history.Filter{Tab: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range l {
+		if e.Text == text {
+			return e.ID
+		}
+	}
+	t.Fatalf("no entry %q", text)
+	return 0
+}
+
+func TestListSearchLimitAppliesAfterRanking(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "abc exact"}, historytest.T0)
+	// Newer rows that pass the SQL fuzzy prefilter but are too spread out
+	// to match: they must not take the limit's places.
+	for i := range 5 {
+		historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: fmt.Sprintf("a......b......c %d", i)}, historytest.T0.Add(time.Duration(i+1)*time.Minute))
+	}
+	// More real matches than the limit: the best ones are kept.
+	for i := range 3 {
+		historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: fmt.Sprintf("xabcx %d", i)}, historytest.T0.Add(time.Duration(i+10)*time.Minute))
+	}
+	list, err := s.List(ctx, history.Filter{Tab: "all", Query: query("abc"), Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := historytest.Texts(list), []string{"abc exact", "xabcx 2", "xabcx 1"}; !slices.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -143,7 +227,7 @@ func TestDeleteRestoreRoundTrip(t *testing.T) {
 	if string(img.Image) != string(png) || len(img.Thumb) == 0 {
 		t.Error("image or thumb lost in restore")
 	}
-	if l, _ := s.List(ctx, history.Filter{Tab: "all", Query: "hel"}); len(l) != 1 {
+	if l, _ := s.List(ctx, history.Filter{Tab: "all", Query: query("hel")}); len(l) != 1 {
 		t.Error("search column lost in restore")
 	}
 }
@@ -175,12 +259,12 @@ func TestSnippetsCRUDAndSearch(t *testing.T) {
 	if _, err := s.SaveSnippet(ctx, history.Snippet{ID: id, Name: "Greeting", Body: "Hi there"}); err != nil {
 		t.Fatal(err)
 	}
-	l, _ := s.Snippets(ctx, "HI T")
+	l, _ := s.Snippets(ctx, query("HI T").Terms)
 	if len(l) != 1 || l[0].Body != "Hi there" {
 		t.Errorf("search: %+v", l)
 	}
 	s.DeleteSnippet(ctx, id)
-	if l, _ := s.Snippets(ctx, ""); len(l) != 1 {
+	if l, _ := s.Snippets(ctx, nil); len(l) != 1 {
 		t.Errorf("after delete: %+v", l)
 	}
 }
@@ -223,7 +307,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if l, _ := dst.List(ctx, history.Filter{Tab: "all"}); len(l) != 3 {
 		t.Errorf("re-import duplicated rows: %d", len(l))
 	}
-	if sns, _ := dst.Snippets(ctx, ""); len(sns) != 1 {
+	if sns, _ := dst.Snippets(ctx, nil); len(sns) != 1 {
 		t.Errorf("snippets duplicated: %d", len(sns))
 	}
 }

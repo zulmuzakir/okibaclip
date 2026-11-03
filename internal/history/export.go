@@ -75,7 +75,7 @@ func (s *Store) Export(ctx context.Context) (ExportFile, error) {
 		f.Entries = append(f.Entries, ExportEntry{Kind: e.Kind, Text: e.Text, HTML: e.HTML, Image: e.Image, Width: e.Width, Height: e.Height,
 			Pinned: e.Pinned, CreatedAt: ms(e.CreatedAt), UsedAt: ms(e.UsedAt), UseCount: e.UseCount})
 	}
-	sn, err := s.Snippets(ctx, "")
+	sn, err := s.Snippets(ctx, nil)
 	if err != nil {
 		return f, err
 	}

@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/egoist/mygo/plugins/sqlite"
+
+	"pastello/internal/search"
 )
 
 // Store is the SQLite history and snippet database.
@@ -19,7 +22,7 @@ type Store struct{ db *sqlite.DB }
 // Filter selects history rows.
 type Filter struct {
 	Tab   string // "all", "pinned", "text", "link", "image", "files"
-	Query string
+	Query search.Query
 	Limit int
 }
 
@@ -171,17 +174,108 @@ func tabClause(tab string) string {
 	return "1"
 }
 
-// List returns the entries matching f, pinned first, then by last use.
+// List returns the entries matching f. Without search words they come pinned
+// first, then by last use; with them, best match first, in that order among
+// equal matches.
 func (s *Store) List(ctx context.Context, f Filter) ([]Entry, error) {
 	if f.Limit <= 0 {
 		f.Limit = 1000
 	}
-	q := strings.ToLower(f.Query)
-	rows, err := s.db.Query(ctx, `SELECT `+listCols+` FROM entries WHERE (?='' OR instr(search, ?) > 0) AND `+tabClause(f.Tab)+` ORDER BY pinned DESC, used_at DESC LIMIT ?`, q, q, f.Limit)
+	q := f.Query
+	where := []string{tabClause(f.Tab)}
+	var args []any
+	if len(q.Kinds) > 0 {
+		where = append(where, "kind IN (?"+strings.Repeat(",?", len(q.Kinds)-1)+")")
+		for _, k := range q.Kinds {
+			args = append(args, k)
+		}
+	}
+	if q.Pinned != nil {
+		where = append(where, "pinned=?")
+		args = append(args, *q.Pinned)
+	}
+	if !q.After.IsZero() {
+		where = append(where, "used_at>=?")
+		args = append(args, ms(q.After))
+	}
+	if !q.Before.IsZero() {
+		where = append(where, "used_at<?")
+		args = append(args, ms(q.Before))
+	}
+	// Rows hold only the start of their text, so each word also reports
+	// whether the whole text has it; fuzzy candidates are narrowed with
+	// LIKE '%w%o%r%d%' and confirmed by search.Score. With words, the limit
+	// applies after ranking: loose candidates must not crowd out matches.
+	cols := listCols
+	var colArgs []any
+	for _, t := range q.Terms {
+		cols += `, instr(search, ?) > 0`
+		colArgs = append(colArgs, t.Text)
+		if t.Fuzzy() {
+			where = append(where, `(instr(search, ?) > 0 OR substr(search, 1, ?) LIKE ? ESCAPE '\')`)
+			args = append(args, t.Text, search.FuzzyWindow, likeSubsequence(t.Text))
+		} else {
+			where = append(where, `instr(search, ?) > 0`)
+			args = append(args, t.Text)
+		}
+	}
+	limit := ""
+	if len(q.Terms) == 0 {
+		limit = " LIMIT ?"
+		args = append(args, f.Limit)
+	}
+	args = append(colArgs, args...)
+	rows, err := s.db.Query(ctx, `SELECT `+cols+` FROM entries WHERE `+strings.Join(where, " AND ")+` ORDER BY pinned DESC, used_at DESC`+limit, args...)
 	if err != nil {
 		return nil, err
 	}
-	return scanRows(rows, scanList), nil
+	if len(q.Terms) == 0 {
+		return scanRows(rows, scanList), nil
+	}
+	type ranked struct {
+		e     Entry
+		score int
+	}
+	var out []ranked
+	for _, r := range rows.Values {
+		e, inFull := scanList(r), r[len(r)-len(q.Terms):]
+		total := 0
+		for i, t := range q.Terms {
+			sc := search.Score(e.Text, t)
+			if sc == 0 && asInt(inFull[i]) != 0 {
+				sc = search.ScoreSubstring // past the start of the text the row holds
+			}
+			if sc == 0 {
+				total = 0
+				break
+			}
+			total += sc
+		}
+		if total > 0 {
+			out = append(out, ranked{e, total})
+		}
+	}
+	slices.SortStableFunc(out, func(a, b ranked) int { return b.score - a.score })
+	entries := make([]Entry, min(len(out), f.Limit))
+	for i, r := range out[:len(entries)] {
+		entries[i] = r.e
+	}
+	return entries, nil
+}
+
+// likeSubsequence is the LIKE pattern of s's characters in order, with
+// anything between them.
+func likeSubsequence(s string) string {
+	var b strings.Builder
+	b.WriteByte('%')
+	for _, r := range s {
+		if r == '%' || r == '_' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+		b.WriteByte('%')
+	}
+	return b.String()
 }
 
 func scanRows(rows sqlite.Rows, scan func([]any) Entry) []Entry {

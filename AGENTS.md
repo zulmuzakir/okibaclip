@@ -27,6 +27,11 @@ flowchart LR
   - `app.ready()` (`app.go`) opens `settings.json` and `history.db` from `mygo.App.Path(mygo.PathUserData)`, then builds the panel, tray and shortcut.
 - **`app` struct (`app.go`):** the single owner of state. View state (`items`, `query`, `tab`, `selected`, `list`, `gen`/`previewGen`…) is touched only on the main thread.
 - **Monitor (`internal/capture/monitor.go`):** polls the clipboard. It uses a change token on macOS and Windows (`token_*.go`, build-tagged) and a content fingerprint elsewhere. Captures upsert by content hash (`history.Capture.Hash`), then `Prune` runs.
+- **Search (`internal/search`, `history.List`):**
+  - `app.reload` runs `search.Parse(a.query, time.Now())`. The result has terms (words and `"phrases"`) and filters (`type:`, `is:`, `after:`, `before:`). The query the current results answer is kept in `a.shown`; highlights and the result count read from it.
+  - `history.List` prefilters in SQL: tab and filters, `instr(search, term)` for substrings, and `substr(search,1,512) LIKE '%t%e%r%m%'` for fuzzy candidates. It then ranks in Go with `search.Score`. List rows hold only the first 4000 characters of the text, so each term also returns a whole-text `instr` flag. Keep both parts in step when changing matching.
+  - The UI highlights matches with `search.Highlight` (byte ranges), rendered as `ui.RichText` spans in `app.highlighted`.
+  - The search field takes Enter, so `OnTextKey` copies the chosen row on ↵ / ⇧↵ (plain).
 - **Copy-back (`copy.go`):**
   - Calls `mon.Suppress(hash)` *before* `a.writeClipboard`, so the next poll can't record the app's own write. Suppression drops one matching capture within 3 s. Keep this order.
   - Text writes use `a.suppressText(text)`.
@@ -46,6 +51,7 @@ flowchart LR
 | `internal/history/` | SQLite store (`store.go`), entries/thumbnails (`entry.go`), snippets, export format |
 | `internal/history/historytest/` | Test fixtures: `T0`, `NewStore(t)`, `Add`, `PNG`, `Texts` |
 | `internal/settings/` | `settings.json` model, `Normalize` clamping, atomic 0600 `Save` |
+| `internal/search/` | Query parsing, word scoring (whole word > word start > substring > fuzzy), highlight ranges |
 | `internal/transform/` | Text transforms offered in the context menu |
 | `resources/` | `icon.png`; ships with every build (platform subdirectories like `resources/linux-amd64/` ship only with that platform) |
 | `.agents/skills/mygo-maintenance/` | mygo UI/threading rules; read before UI work |

@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"pastello/internal/history"
+	"pastello/internal/search"
 	"pastello/internal/transform"
 )
 
@@ -188,11 +189,23 @@ func (a *app) view(c *ui.Context) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Row(c).Padding(14, 16).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Icon(c, iconSearch).FontSize(18).TextColor(t.TextMuted)
-			if ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(18).
-				Placeholder("Search clipboard").Label("Search clipboard").Changed() {
+			// The field takes Enter before the panel's shortcuts see it.
+			in := ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(18).
+				Placeholder(`Search: words, "phrase", type:link, is:pinned, after:7d`).Label("Search clipboard").
+				OnTextKey(func(k ui.TextKey) bool {
+					if k.Key != ui.KeyEnter {
+						return false
+					}
+					a.copyChosen(k.Mods&ui.Shift != 0)
+					return true
+				})
+			if in.Changed() {
 				a.chosen, a.chosenSnippet = 0, 0
 				a.selected.Clear()
 				a.reload()
+			}
+			if count := a.resultCount(); count != "" {
+				ui.Text(c, count).FontSize(12).TextColor(t.TextMuted)
 			}
 		})
 		if ui.Tabs(c, &a.tab, tabLabels...).Changed() {
@@ -339,8 +352,90 @@ func (a *app) leading(c *ui.Context, e history.Entry, fg ui.Color) {
 	ui.Icon(c, kindIcon(e.Kind)).FontSize(20).TextColor(fg).Size(28, 28)
 }
 
-func (a *app) historyList(c *ui.Context) {
+// resultCount labels how many results the shown search found, or is empty
+// when nothing is searched.
+func (a *app) resultCount() string {
+	if a.shown.IsZero() {
+		return ""
+	}
+	n := len(a.items)
+	if a.tab == tabSnippets {
+		n = len(a.snippets)
+	}
+	switch {
+	case n == 1:
+		return "1 result"
+	case n >= listLimit && a.tab != tabSnippets:
+		return fmt.Sprintf("%d+ results", listLimit)
+	}
+	return fmt.Sprintf("%d results", n)
+}
+
+// highlighted shows s with what the shown search matches in it in bold on
+// hl.
+func (a *app) highlighted(c *ui.Context, s string, hl ui.Color) ui.Element {
+	rs := search.Highlight(s, a.shown.Terms)
+	if len(rs) == 0 {
+		return ui.Text(c, s)
+	}
+	spans := make([]ui.Span, 0, 2*len(rs)+1)
+	at := 0
+	for _, r := range rs {
+		if r.Start > at {
+			spans = append(spans, ui.Span{Text: s[at:r.Start]})
+		}
+		spans = append(spans, ui.Span{Text: s[r.Start:r.End], Weight: 700, Background: hl, Radius: 3})
+		at = r.End
+	}
+	if at < len(s) {
+		spans = append(spans, ui.Span{Text: s[at:]})
+	}
+	return ui.RichText(c, spans...)
+}
+
+// emptyState fills an empty list with an icon, a title and tips.
+func emptyState(c *ui.Context, icon *ui.SVG, title string, tips ...string) {
 	t := c.Theme()
+	ui.Column(c).Padding(24, 16).Gap(6).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, icon).FontSize(28).TextColor(t.TextMuted)
+		ui.Text(c, title).Bold().Wrap().TextAlign(ui.Center)
+		for _, tip := range tips {
+			ui.Text(c, tip).FontSize(11).TextColor(t.TextMuted).Wrap().TextAlign(ui.Center)
+		}
+	})
+}
+
+// tabEmpty is the icon, title and tip of each history tab when it is empty
+// and nothing is searched, in tabLabels order.
+var tabEmpty = []struct {
+	icon       *ui.SVG
+	title, tip string
+}{
+	{iconClipboard, "Nothing copied yet", "Copy something and it will appear here."},
+	{iconPin, "Nothing pinned", "Pin entries you reuse with " + cmdSym() + "P or their context menu."},
+	{iconClipboard, "No text yet", "Copied text and colors appear here."},
+	{iconLink, "No links yet", "Copied web addresses appear here."},
+	{iconImage, "No images yet", "Copied images and screenshots appear here."},
+	{iconFile, "No files yet", "Files copied in the file manager appear here."},
+}
+
+// noMatches fills a list the search found nothing for.
+func (a *app) noMatches(c *ui.Context) {
+	tips := []string{"Try fewer or shorter words."}
+	if a.shown.HasFilters() {
+		tips = append(tips, "Or remove a filter: type:, is:, after:, before:.")
+	}
+	if a.tab != 0 && a.tab != tabSnippets {
+		tips = append(tips, "Or search All instead of "+tabLabels[a.tab]+".")
+	}
+	tips = append(tips, "",
+		`"exact phrase" · is:pinned · is:unpinned`,
+		"type:text, link, color, image or file",
+		"after:/before: 7d, today, 2026-01-31")
+	emptyState(c, iconSearch, "No matches for “"+strings.TrimSpace(a.query)+"”", tips...)
+}
+
+func (a *app) historyList(c *ui.Context) {
 	a.list.Label = func(i int) string { return preview(a.items[i]) }
 	a.list.Selected = &a.chosen
 	now := time.Now()
@@ -348,17 +443,17 @@ func (a *app) historyList(c *ui.Context) {
 		ItemKey(func(i int) any { return a.items[i].ID }).
 		Selection(&a.selected).
 		Grow(1).Padding(6).Children(func() {
-		if len(a.items) == 0 {
-			msg := "No matches"
-			if a.query == "" && a.tab == 0 {
-				msg = "Nothing copied yet. Copy something and it will appear here."
+		switch {
+		case len(a.items) > 0:
+		case !a.shown.IsZero():
+			a.noMatches(c)
+		default:
+			e := tabEmpty[a.tab]
+			tips := []string{e.tip}
+			if a.tab == 0 && a.shortcut != "" {
+				tips = append(tips, keys(a.shortcut)+" opens this panel.")
 			}
-			ui.Column(c).Padding(16).Gap(6).Children(func() {
-				ui.Text(c, msg).TextColor(t.TextMuted).Wrap()
-				if a.query == "" && a.tab == 0 && a.shortcut != "" {
-					ui.Text(c, keys(a.shortcut)+" opens this panel").FontSize(11).TextColor(t.TextMuted).Wrap()
-				}
-			})
+			emptyState(c, e.icon, e.title, tips...)
 		}
 	}).Rows(func(r ui.ListRow) { a.row(r, now) })
 	if list.Changed() {
@@ -386,21 +481,29 @@ func (a *app) row(r ui.ListRow, now time.Time) {
 	t := c.Theme()
 	on := r.Selected() || i == a.chosen // the keyboard moves a.chosen without filling the selection set
 	bg := ui.Transparent
-	text, muted := t.Text, t.TextMuted
+	text, muted, hl := t.Text, t.TextMuted, t.Accent.Alpha(0.22)
 	if on {
 		bg = t.Accent.Alpha(0.85)
-		text, muted = t.AccentText, t.AccentText.Alpha(0.75)
+		text, muted, hl = t.AccentText, t.AccentText.Alpha(0.75), t.AccentText.Alpha(0.28)
 	}
+	title, detail := rowLines(e)
 	row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8).Background(bg).Children(func() {
 		a.leading(c, e, muted)
-		ui.Text(c, preview(e)).SingleLine().Grow(1).TextColor(text)
-		ui.Text(c, relTime(now, e.UsedAt)).FontSize(11).TextColor(muted)
-		if e.Pinned {
-			ui.Icon(c, iconPin).FontSize(12).TextColor(muted)
-		}
-		if i < 9 {
-			ui.Text(c, fmt.Sprintf("%s%d", cmdSym(), i+1)).FontSize(10).TextColor(muted)
-		}
+		ui.Column(c).Grow(1).Gap(2).Children(func() {
+			a.highlighted(c, title, hl).SingleLine().TextColor(text)
+			a.highlighted(c, detail, hl).FontSize(11).SingleLine().TextColor(muted)
+		})
+		ui.Column(c).Gap(4).AlignItems(ui.End).Children(func() {
+			ui.Text(c, relTime(now, e.UsedAt)).FontSize(11).TextColor(muted)
+			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+				if e.Pinned {
+					ui.Icon(c, iconPin).FontSize(12).TextColor(muted)
+				}
+				if i < 9 {
+					ui.Text(c, fmt.Sprintf("%s%d", cmdSym(), i+1)).FontSize(10).TextColor(muted)
+				}
+			})
+		})
 	})
 	row.ContextMenu(func(m *ui.Menu) {
 		ids := a.selectedIDs()
@@ -471,6 +574,20 @@ func (a *app) previewPane(c *ui.Context) {
 	if a.preview.ID == e.ID {
 		e = a.preview
 	}
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, kindIcon(e.Kind)).FontSize(16).TextColor(t.TextMuted)
+		ui.Text(c, kindTitle(e)).Bold().SingleLine().Grow(1)
+		ui.Button(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copyEntry(e, false) })
+		pin := "Pin"
+		if e.Pinned {
+			pin = "Unpin"
+		}
+		ui.Button(c, pin).Tooltip(pin + " (" + cmdSym() + "P)").OnClick(func() { a.setPinned(e.ID, !e.Pinned) })
+		ui.Button(c, "Delete").Tooltip("Delete (" + cmdSym() + "⌫)").OnClick(func() { a.deleteEntries([]int64{e.ID}) })
+	})
+	ui.Text(c, details(e, time.Now())).FontSize(11).TextColor(t.TextMuted).Wrap()
+	ui.Divider(c)
+	hl := t.Accent.Alpha(0.22)
 	ui.Scroll(c).Grow(1).Children(func() {
 		ui.Column(c).Gap(8).Children(func() {
 			switch e.Kind {
@@ -483,7 +600,7 @@ func (a *app) previewPane(c *ui.Context) {
 			case history.KindFiles:
 				for _, p := range strings.Split(e.Text, "\n") {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, p).Wrap().Grow(1).Selectable()
+						a.highlighted(c, p, hl).Wrap().Grow(1).Selectable()
 						ui.Button(c, "Show in Folder").OnClick(func() { showInFolder(p) })
 					})
 				}
@@ -492,16 +609,11 @@ func (a *app) previewPane(c *ui.Context) {
 				if n := utf8.RuneCountInString(text); n > 20000 {
 					text = string([]rune(text)[:20000]) + fmt.Sprintf("… (%d more characters)", n-20000)
 				}
-				ui.Text(c, text).Wrap().Selectable()
+				a.highlighted(c, text, hl).Wrap().Selectable()
 				if e.Kind == history.KindLink && ui.Button(c, "Open Link").Clicked() {
 					openLink(strings.TrimSpace(e.Text))
 				}
 			}
 		})
 	})
-	if e.UseCount > 0 {
-		kind := strings.ToUpper(string(e.Kind[:1])) + string(e.Kind[1:])
-		ui.Text(c, fmt.Sprintf("%s · %s · copied %d× · first %s", kind, humanSize(e.Size), e.UseCount, e.CreatedAt.Format("Jan 2, 2006"))).
-			FontSize(11).TextColor(t.TextMuted)
-	}
 }

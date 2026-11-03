@@ -16,6 +16,7 @@ import (
 
 	"pastello/internal/capture"
 	"pastello/internal/history"
+	"pastello/internal/search"
 	"pastello/internal/settings"
 )
 
@@ -30,6 +31,9 @@ var tabLabels = []string{"All", "Pinned", "Text", "Links", "Images", "Files", "S
 var tabFilters = []string{"all", "pinned", "text", "link", "image", "files"}
 
 const tabSnippets = 6
+
+// listLimit is the most history rows the panel lists.
+const listLimit = 1000
 
 // captureControl is what the app asks of the clipboard monitor.
 type captureControl interface {
@@ -61,6 +65,7 @@ type app struct {
 	items         []history.Entry
 	snippets      []history.Snippet
 	query         string
+	shown         search.Query // the query a.items and a.snippets answer, for highlights
 	tab           int
 	chosen        int
 	selected      ui.Selection[int64]
@@ -262,15 +267,16 @@ func (a *app) toggle(o origin) {
 // reload runs the list query asynchronously and applies the newest result.
 func (a *app) reload() {
 	a.gen++
-	gen, query, tab := a.gen, a.query, a.tab
+	gen, tab := a.gen, a.tab
+	q := search.Parse(a.query, time.Now())
 	a.async(func() {
 		var items []history.Entry
 		var snips []history.Snippet
 		var err error
 		if tab == tabSnippets {
-			snips, err = a.store.Snippets(a.ctx, query)
+			snips, err = a.store.Snippets(a.ctx, q.Terms)
 		} else {
-			items, err = a.store.List(a.ctx, history.Filter{Tab: tabFilters[tab], Query: query, Limit: 1000})
+			items, err = a.store.List(a.ctx, history.Filter{Tab: tabFilters[tab], Query: q, Limit: listLimit})
 		}
 		if err != nil {
 			if a.ctx.Err() == nil {
@@ -282,7 +288,7 @@ func (a *app) reload() {
 			if gen != a.gen {
 				return
 			}
-			a.items, a.snippets = items, snips
+			a.items, a.snippets, a.shown = items, snips, q
 			keep := map[int64]*ui.Bitmap{}
 			for _, e := range items {
 				if b, ok := a.thumbs[e.ID]; ok {
@@ -312,7 +318,7 @@ func (a *app) refreshData() {
 	a.async(func() {
 		recent, err1 := a.store.Recent(a.ctx, 10)
 		pinned, err2 := a.store.Pinned(a.ctx, 20)
-		snips, err3 := a.store.Snippets(a.ctx, "")
+		snips, err3 := a.store.Snippets(a.ctx, nil)
 		e, p, s, err4 := a.store.Counts(a.ctx)
 		if err := firstErr(err1, err2, err3, err4); err != nil {
 			if a.ctx.Err() == nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,84 @@ func preview(e history.Entry) string {
 		return strings.TrimSpace(e.Text)
 	}
 	return textPreview(e.Text, 120)
+}
+
+// rowLines are the two lines of an entry's list row: what it holds, then
+// its second line of text, or else its kind and a detail.
+func rowLines(e history.Entry) (title, detail string) {
+	switch e.Kind {
+	case history.KindImage:
+		return "Image", fmt.Sprintf("%d×%d · %s", e.Width, e.Height, humanSize(e.Size))
+	case history.KindFiles:
+		first, _, _ := strings.Cut(e.Text, "\n")
+		return preview(e), filepath.Dir(first)
+	case history.KindLink:
+		text := strings.TrimSpace(e.Text)
+		if u, err := url.Parse(text); err == nil && u.Host != "" {
+			return text, "Link · " + u.Host
+		}
+		return text, "Link"
+	case history.KindColor:
+		return strings.TrimSpace(e.Text), "Color"
+	}
+	var lines []string
+	for _, l := range strings.Split(e.Text, "\n") {
+		if l = strings.Join(strings.Fields(l), " "); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	switch len(lines) {
+	case 0:
+		return "", "Text · " + humanSize(e.Size)
+	case 1:
+		return truncRunes(lines[0], 120), "Text · " + humanSize(e.Size)
+	}
+	detail = truncRunes(lines[1], 120)
+	if n := len(lines) - 2; n > 0 {
+		detail += fmt.Sprintf(" · +%d lines", n)
+	}
+	return truncRunes(lines[0], 120), detail
+}
+
+// kindTitle names an entry's kind for the preview header.
+func kindTitle(e history.Entry) string {
+	switch e.Kind {
+	case history.KindImage:
+		return "Image"
+	case history.KindFiles:
+		if n := strings.Count(e.Text, "\n") + 1; n > 1 {
+			return fmt.Sprintf("%d Files", n)
+		}
+		return "File"
+	}
+	k := string(e.Kind)
+	return strings.ToUpper(k[:1]) + k[1:]
+}
+
+// details describes an entry's size and use for the preview header.
+func details(e history.Entry, now time.Time) string {
+	parts := []string{humanSize(e.Size)}
+	if e.Kind == history.KindImage {
+		parts[0] = fmt.Sprintf("%d×%d", e.Width, e.Height)
+		parts = append(parts, humanSize(e.Size))
+	}
+	if e.UseCount > 1 {
+		parts = append(parts, fmt.Sprintf("used %d×", e.UseCount))
+	}
+	parts = append(parts, "last used "+ago(now, e.UsedAt), "first copied "+e.CreatedAt.Format("Jan 2, 2006 15:04"))
+	return strings.Join(parts, " · ")
+}
+
+// ago is relTime as a phrase: "just now", "5m ago", "on Jan 2".
+func ago(now, t time.Time) string {
+	r := relTime(now, t)
+	switch {
+	case r == "now":
+		return "just now"
+	case now.Sub(t) < 7*24*time.Hour:
+		return r + " ago"
+	}
+	return "on " + r
 }
 
 // textPreview is the first non-blank line, whitespace collapsed, cut at

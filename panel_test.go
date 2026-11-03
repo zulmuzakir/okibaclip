@@ -90,8 +90,57 @@ func TestPanelTypingFiltersRows(t *testing.T) {
 
 func TestPanelEmptyState(t *testing.T) {
 	f := newPanelFixture(t)
-	if !f.tt.HasText("Nothing copied yet. Copy something and it will appear here.") {
+	if !f.tt.HasText("Nothing copied yet") || !f.tt.HasText("Copy something and it will appear here.") {
 		t.Errorf("texts: %q", f.tt.Texts())
+	}
+	if f.tt.HasText("result") {
+		t.Errorf("result count without a search: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelSearchRanksBestMatchFirst(t *testing.T) {
+	// Newest first without a search: "push gitlab" would lead.
+	f := newPanelFixture(t, "git push origin", "push gitlab", "unrelated")
+	f.a.search.Focus()
+	f.tt.Frame()
+	f.tt.Type("git push")
+	if !f.tt.HasText("2 results") || f.tt.HasText("unrelated") {
+		t.Fatalf("texts: %q", f.tt.Texts())
+	}
+	f.tt.Key(0, ui.KeyEnter)
+	if got := f.written(t); len(got) != 1 || got[0] != "git push origin" {
+		t.Errorf("Enter copied %q, want the whole-word match", got)
+	}
+}
+
+func TestPanelSearchFiltersAndNoMatchTips(t *testing.T) {
+	f := newPanelFixture(t, "plain words")
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindLink, Text: "https://example.com/words"}, historytest.T0.Add(time.Minute))
+	f.a.reload()
+	f.a.search.Focus()
+	f.tt.Frame()
+	f.tt.Type("words type:link")
+	if !f.tt.HasText("1 result") || !f.tt.HasText("https://example.com/words") || f.tt.HasText("plain words") {
+		t.Fatalf("texts: %q", f.tt.Texts())
+	}
+	f.tt.Type(" is:pinned")
+	if !f.tt.HasText("No matches for “words type:link is:pinned”") || !f.tt.HasText("Or remove a filter") {
+		t.Errorf("texts: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelPreviewPinButton(t *testing.T) {
+	f := newPanelFixture(t, "keep me")
+	if err := f.tt.Click("Pin"); err != nil {
+		t.Fatalf("%v: %q", err, f.tt.Texts())
+	}
+	f.tt.Frame()
+	l, _ := f.a.store.List(context.Background(), history.Filter{Tab: "all"})
+	if len(l) != 1 || !l[0].Pinned {
+		t.Fatalf("not pinned: %+v", l)
+	}
+	if !f.tt.HasText("Unpin") {
+		t.Errorf("button not updated: %q", f.tt.Texts())
 	}
 }
 
