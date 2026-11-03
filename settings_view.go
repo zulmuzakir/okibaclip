@@ -1,0 +1,336 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
+
+	"my-clipboard/internal/settings"
+)
+
+type settingsState struct {
+	tab        int
+	form       settings.Settings
+	maxEntries float64
+	retention  float64
+	imageMB    float64
+	poll       string
+	patterns   string
+	patErr     string
+	shortcut   string
+	shortcutOK string
+	shortErr   string
+	login      bool
+	loginErr   string
+	toast      string
+	stats      string
+}
+
+var settingsTabs = []string{"General", "History", "Data", "About"}
+
+func pollLabel(ms int) string { return fmt.Sprintf("%d ms", ms) }
+
+// pollChoices are the labels of settings.PollIntervals.
+var pollChoices = func() []string {
+	var out []string
+	for _, ms := range settings.PollIntervals {
+		out = append(out, pollLabel(ms))
+	}
+	return out
+}()
+
+// syncSettingsUI copies the saved settings into the form.
+func (a *app) syncSettingsUI() {
+	s := &a.settingsUI
+	s.form = a.cfg
+	s.maxEntries, s.retention, s.imageMB = float64(a.cfg.MaxEntries), float64(a.cfg.RetentionDays), float64(a.cfg.MaxImageMB)
+	s.poll = pollLabel(a.cfg.PollMillis)
+	s.patterns = strings.Join(a.cfg.IgnorePatterns, "\n")
+	s.patErr = ""
+	s.shortcut = a.shortcut
+	if a.cfg.Shortcut != "" {
+		s.shortcut = a.cfg.Shortcut
+	}
+	s.shortErr = ""
+	s.login = mygo.App.OpenAtLogin()
+}
+
+func (a *app) openSettings() {
+	if a.panel == nil {
+		return
+	}
+	if a.settingsWin == nil {
+		a.settingsWin = mygo.NewWindow(mygo.WindowOptions{
+			Title:    "my-clipboard Settings",
+			Width:    560,
+			Height:   640,
+			StateKey: "settings",
+			Content:  ui.View(a.settingsView),
+		})
+		a.settingsWin.OnClose(func(e *mygo.CloseEvent) {
+			if a.quitting {
+				return
+			}
+			e.PreventDefault()
+			a.settingsWin.Hide()
+		})
+	}
+	a.hide()
+	a.syncSettingsUI()
+	a.refreshStats()
+	a.settingsWin.Show()
+}
+
+func (a *app) refreshStats() {
+	a.async(func() {
+		e, p, s, err := a.store.Counts(a.ctx)
+		if err != nil {
+			return
+		}
+		size := humanSize(fileSize(filepath.Join(a.dataDir, "history.db")))
+		a.postSettings(func() {
+			a.settingsUI.stats = fmt.Sprintf("%d entries · %d pinned · %d snippets · database %s", e, p, s, size)
+		})
+	})
+}
+
+// applySettings validates the form, saves it and pushes it to the monitor.
+func (a *app) applySettings() {
+	s := &a.settingsUI
+	f := s.form
+	f.MaxEntries, f.RetentionDays, f.MaxImageMB = int(s.maxEntries), int(s.retention), int(s.imageMB)
+	for _, ms := range settings.PollIntervals {
+		if pollLabel(ms) == s.poll {
+			f.PollMillis = ms
+		}
+	}
+	lines := strings.Split(s.patterns, "\n")
+	if _, err := settings.CompilePatterns(lines); err != nil {
+		s.patErr = patternErrText(err)
+		f.IgnorePatterns = a.cfg.IgnorePatterns
+	} else {
+		s.patErr = ""
+		f.IgnorePatterns = lines
+	}
+	f.Shortcut = a.cfg.Shortcut
+	f.FirstRunDone = a.cfg.FirstRunDone
+	f.Normalize()
+	s.form = f
+	s.maxEntries, s.retention, s.imageMB = float64(f.MaxEntries), float64(f.RetentionDays), float64(f.MaxImageMB)
+	a.cfg = f
+	if a.cfgPath != "" {
+		if err := settings.Save(a.cfgPath, f); err != nil {
+			s.toast = "Could not save settings: " + err.Error()
+		}
+	}
+	if a.mon != nil {
+		if err := a.mon.SetConfig(f); err != nil {
+			s.patErr = patternErrText(err)
+		}
+	}
+	a.refreshTray()
+	a.reload()
+}
+
+func (a *app) saveShortcut(acc string) {
+	s := &a.settingsUI
+	prev := a.cfg.Shortcut
+	if err := a.applyShortcut(acc); err != nil {
+		s.shortErr = err.Error()
+		a.cfg.Shortcut = prev
+		return
+	}
+	s.shortErr = ""
+	a.cfg.Shortcut = strings.TrimSpace(acc)
+	s.form.Shortcut = a.cfg.Shortcut
+	if a.cfgPath != "" {
+		if err := settings.Save(a.cfgPath, a.cfg); err != nil {
+			s.shortErr = "Could not save settings: " + err.Error()
+		}
+	}
+	s.shortcut = a.shortcut
+	a.refreshTray()
+}
+
+func (a *app) settingsView(c *ui.Context) {
+	t := c.Theme()
+	s := &a.settingsUI
+	if s.toast != "" {
+		c.Toast(s.toast)
+		s.toast = ""
+	}
+	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Hide() })
+	ui.Column(c).Fill().Padding(16).Gap(12).Children(func() {
+		ui.Tabs(c, &s.tab, settingsTabs...)
+		ui.Scroll(c).Grow(1).Children(func() {
+			ui.Column(c).Gap(14).Padding(4, 4, 16, 4).Children(func() {
+				switch s.tab {
+				case 0:
+					a.generalSection(c, t)
+				case 1:
+					a.historySection(c, t)
+				case 2:
+					a.dataSection(c, t)
+				case 3:
+					a.aboutSection(c, t)
+				}
+			})
+		})
+	})
+}
+
+func help(c *ui.Context, t *ui.Theme, text string) {
+	ui.Text(c, text).FontSize(11).TextColor(t.TextMuted).Wrap()
+}
+
+func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
+	s := &a.settingsUI
+	ui.Form(c, func() {
+		ui.Field(c, "Open at login", func() {
+			if ui.Switch(c, &s.login).Label("Open at login").Changed() {
+				if err := mygo.App.SetOpenAtLogin(s.login); err != nil {
+					s.login = !s.login
+					s.loginErr = err.Error()
+				} else {
+					s.loginErr = ""
+				}
+			}
+			if s.loginErr != "" {
+				ui.Text(c, s.loginErr).FontSize(11).TextColor(t.Danger).Wrap()
+			}
+		})
+		ui.Field(c, "Global shortcut", func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				ui.TextInput(c, &s.shortcut).Label("Global shortcut").Grow(1)
+				if ui.Button(c, "Apply").Clicked() {
+					a.saveShortcut(s.shortcut)
+				}
+				if ui.Button(c, "Reset").Clicked() {
+					a.saveShortcut("")
+				}
+			})
+			help(c, t, "Format: CmdOrCtrl+Shift+V. Modifiers: CmdOrCtrl, Cmd, Ctrl, Alt, Shift, Super.")
+			if s.shortErr != "" {
+				ui.Text(c, s.shortErr).FontSize(11).TextColor(t.Danger).Wrap()
+			} else if a.shortcut == "" && a.shortcutErr != "" {
+				ui.Text(c, "No shortcut registered: "+a.shortcutErr).FontSize(11).TextColor(t.Danger).Wrap()
+			}
+		})
+		if isLinux {
+			ui.Field(c, "Desktop shortcut", func() {
+				help(c, t, "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs:")
+				exe, _ := os.Executable()
+				cmd := exe + " --toggle"
+				ui.Text(c, cmd).Wrap().Selectable()
+				if ui.Button(c, "Copy Command").Clicked() {
+					a.suppressText(cmd)
+					if err := a.writeClipboard(textData(cmd, "")); err == nil {
+						c.Toast("Command copied")
+					}
+				}
+			})
+		}
+	})
+}
+
+func (a *app) historySection(c *ui.Context, t *ui.Theme) {
+	s := &a.settingsUI
+	ui.Form(c, func() {
+		ui.Field(c, "Max entries", func() {
+			if ui.NumberInput(c, &s.maxEntries, 50, 5000, 50).Label("Max entries").Changed() {
+				a.applySettings()
+			}
+		})
+		ui.Field(c, "Keep for days", func() {
+			if ui.NumberInput(c, &s.retention, 0, 3650, 1).Label("Keep for days").Changed() {
+				a.applySettings()
+			}
+			help(c, t, "0 keeps forever")
+		})
+		sw := func(label string, v *bool) {
+			ui.Field(c, label, func() {
+				if ui.Switch(c, v).Label(label).Changed() {
+					a.applySettings()
+				}
+			})
+		}
+		sw("Capture images", &s.form.CaptureImages)
+		sw("Capture files", &s.form.CaptureFiles)
+		ui.Field(c, "Max image size (MB)", func() {
+			if ui.NumberInput(c, &s.imageMB, 1, 50, 1).Label("Max image size (MB)").Changed() {
+				a.applySettings()
+			}
+		})
+		sw("Skip passwords & concealed copies", &s.form.SkipSensitive)
+		sw("Move copied entry to top", &s.form.MoveToTopOnCopy)
+		ui.Field(c, "Check clipboard every", func() {
+			if ui.Select(c, &s.poll, pollChoices).Label("Check clipboard every").Changed() {
+				a.applySettings()
+			}
+		})
+		ui.Field(c, "Ignore patterns", func() {
+			if ui.TextArea(c, &s.patterns).Label("Ignore patterns").Height(110).Changed() {
+				a.applySettings()
+			}
+			help(c, t, "One regular expression per line. Text matching one entirely is not recorded.")
+			if s.patErr != "" {
+				ui.Text(c, s.patErr).FontSize(11).TextColor(t.Danger).Wrap()
+			}
+		})
+	})
+}
+
+func (a *app) dataSection(c *ui.Context, t *ui.Theme) {
+	s := &a.settingsUI
+	ui.Row(c).Gap(8).Children(func() {
+		if ui.Button(c, "Export…").Clicked() {
+			a.exportData()
+		}
+		if ui.Button(c, "Import…").Clicked() {
+			a.importData()
+		}
+	})
+	ui.Row(c).Gap(8).Children(func() {
+		if ui.Button(c, "Open Data Folder").Clicked() {
+			if err := mygo.Shell.OpenPath(a.dataDir); err != nil {
+				s.toast = err.Error()
+			}
+		}
+		if ui.Button(c, "Clear History…").Clicked() {
+			a.confirmClear(a.settingsWin)
+		}
+	})
+	ui.Text(c, s.stats).FontSize(12).TextColor(t.TextMuted).Wrap()
+}
+
+func (a *app) aboutSection(c *ui.Context, t *ui.Theme) {
+	ui.Text(c, "my-clipboard "+mygo.App.Version()).Bold().FontSize(16)
+	ui.Text(c, "Data folder: "+a.dataDir).Wrap().Selectable()
+	status := "Tray: OK"
+	if a.trayErr != "" {
+		status = "Tray: " + a.trayErr
+	} else if a.tray == nil {
+		status = "Tray: not started"
+	}
+	ui.Text(c, status).Wrap()
+	if isDarwin {
+		help(c, t, "If macOS asks, choose Always Allow for my-clipboard (System Settings › Privacy & Security › Paste from Other Apps)")
+	}
+	if a.waylandMode == "wayland" {
+		help(c, t, "Native Wayland: copies are recorded only while a my-clipboard window is focused.")
+	}
+}
+
+// patternErrText words an ignore-pattern error for the settings form.
+func patternErrText(err error) string {
+	var pe *settings.PatternError
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("Line %d: %v", pe.Line, pe.Err)
+	}
+	return err.Error()
+}

@@ -1,59 +1,51 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"log/slog"
+	"os"
+	"runtime"
 
 	"github.com/egoist/mygo"
-	"github.com/egoist/mygo/ui"
 )
 
-// app is the state the window shows. Its view builds the interface from
-// it, on the main thread, whenever the window needs a frame: after input,
-// after Window.Update, and while something animates.
-type app struct {
-	name  string
-	count int
-}
-
-func (a *app) view(c *ui.Context) {
-	t := c.Theme()
-	ui.Column(c).Fill().Center().Gap(16).Padding(24).Children(func() {
-		ui.Text(c, "my-clipboard").FontSize(26).Bold()
-		ui.TextInput(c, &a.name).Placeholder("Your name").Label("Name").Width(240)
-		greeting := "Hello!"
-		if a.name != "" {
-			greeting = fmt.Sprintf("Hello, %s!", a.name)
-		}
-		ui.Text(c, greeting).TextColor(t.TextMuted)
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, "−").Width(44).Clicked() {
-				a.count--
-			}
-			ui.Textf(c, "%d", a.count).FontSize(20).Width(48).TextAlign(ui.Center)
-			if ui.PrimaryButton(c, "+").Width(44).Clicked() {
-				a.count++
-			}
-		})
-	})
-}
-
 func main() {
-	a := &app{}
-	mygo.App.WhenReady(func() {
-		mygo.NewWindow(mygo.WindowOptions{
-			Title:     "my-clipboard",
-			Width:     480,
-			Height:    360,
-			MinWidth:  320,
-			MinHeight: 280,
-			// Opens where the user left it last time.
-			StateKey: "main",
-			// The window shows the interface MyGo draws, not a web page.
-			Content: ui.View(a.view),
-		})
-	})
-	if err := mygo.App.Run(); err != nil {
-		log.Fatal(err)
+	mygo.App.SetName("my-clipboard")
+	if !mygo.App.RequestSingleInstanceLock() {
+		return // the running instance gets our arguments (OnSecondInstance)
 	}
+	a := newApp()
+	a.waylandMode = configureLinuxBackend()
+	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
+	mygo.App.OnWindowAllClosed(func() {})
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
+	mygo.App.OnSecondInstance(func(args []string, _ string) { a.command(args, true) })
+	mygo.App.WhenReady(a.ready)
+	if err := mygo.App.Run(); err != nil {
+		slog.Error("run", "err", err)
+		os.Exit(1)
+	}
+}
+
+// configureLinuxBackend forces XWayland where it exists, so the clipboard
+// and global shortcuts work (GTK3 under native Wayland sees clipboard
+// changes only while focused). It returns "x11", "xwayland" or "wayland",
+// and "" off Linux.
+func configureLinuxBackend() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	wayland := os.Getenv("WAYLAND_DISPLAY") != ""
+	display := os.Getenv("DISPLAY") != ""
+	switch {
+	case wayland && display && os.Getenv("GDK_BACKEND") == "" && os.Getenv("MY_CLIPBOARD_NATIVE_WAYLAND") == "":
+		os.Setenv("GDK_BACKEND", "x11")
+		return "xwayland"
+	case wayland && !display:
+		return "wayland"
+	case wayland && os.Getenv("GDK_BACKEND") == "x11":
+		return "xwayland"
+	case wayland:
+		return "wayland"
+	}
+	return "x11"
 }

@@ -2,5 +2,7 @@
   "name": "my-clipboard",
   "identifier": "com.example.myclipboard",
   "version": "0.1.0",
-  "out": "build"
+  "out": "build",
+  "macos": { "infoPlist": { "LSUIElement": true } },
+  "linux": { "webview": false, "depends": ["libayatana-appindicator3-1"], "categories": ["Utility"] }
 }
