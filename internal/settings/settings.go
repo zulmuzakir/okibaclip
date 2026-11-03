@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"okibaclip/internal/fsutil"
 )
 
 // Settings are the user's preferences, stored as settings.json.
@@ -93,11 +95,7 @@ func Save(path string, s Settings) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, b)
 }
 
 // CompilePatterns compiles one regexp per line; blank lines are skipped

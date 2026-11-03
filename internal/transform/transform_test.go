@@ -24,6 +24,8 @@ func TestTransformsSucceed(t *testing.T) {
 		{"URL Decode", "a+b%26c", "a b&c"},
 		{"Base64 Encode", "hi!", "aGkh"},
 		{"Base64 Decode", "aGkh", "hi!"},
+		{"Base64 Decode", "aGk", "hi"},
+		{"Base64 Decode", "aGk_", "hi?"},
 	}
 	for _, c := range cases {
 		got, err := transformNamed(t, c.name).Fn(c.in)
@@ -38,6 +40,7 @@ func TestTransformsFail(t *testing.T) {
 		{"JSON Pretty-Print", `{bad`},
 		{"JSON Minify", `[1,`},
 		{"URL Decode", "100%"},
+		{"URL Decode", "%ff"},
 		{"Base64 Decode", "!!!"},
 		{"Base64 Decode", "/w=="}, // 0xFF: valid base64, not UTF-8
 	}

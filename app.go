@@ -42,6 +42,7 @@ type captureControl interface {
 	Paused() (bool, time.Time)
 	IgnoreNext()
 	Suppress(hash string)
+	Unsuppress(hash string)
 	SetConfig(s settings.Settings) error
 }
 
@@ -90,8 +91,11 @@ type app struct {
 		id         int64
 		name, body string
 		err        string
+		saving     bool
 	}
-	pending func() // chosen in a context menu, run after the list is built
+	listStale bool   // the query or tab changed and its results haven't landed
+	afterList func() // runs once fresh results land
+	pending   func() // chosen in a context menu, run after the list is built
 
 	// Tray data, refreshed by refreshData.
 	trayRecent, trayPinned []history.Entry
@@ -99,6 +103,7 @@ type app struct {
 	counts                 struct{ entries, pinned, snippets int }
 	trayTimer              *time.Timer
 	trayPaused             bool
+	trayGen, statsGen      uint64
 
 	quitting    bool
 	waylandMode string
@@ -219,9 +224,8 @@ func (a *app) show(o origin) {
 	a.selected.Clear()
 	a.toast, a.toastUndo = "", nil
 	a.footerNote, a.hint = a.hint, ""
-	a.editor.open = false
 	a.syntaxOpen = false
-	a.reload()
+	a.requery()
 	a.search.Focus()
 	a.panel.Show()
 }
@@ -286,6 +290,11 @@ func (a *app) reload() {
 			if a.ctx.Err() == nil {
 				slog.Error("list", "err", err)
 			}
+			a.post(func() {
+				if gen == a.gen {
+					a.listStale, a.afterList = false, nil
+				}
+			})
 			return
 		}
 		a.post(func() {
@@ -303,14 +312,24 @@ func (a *app) reload() {
 			a.chosen = max(0, min(a.chosen, len(items)-1))
 			a.chosenSnippet = max(0, min(a.chosenSnippet, len(snips)-1))
 			a.loadPreview()
+			a.listStale = false
+			if fn := a.afterList; fn != nil {
+				a.afterList = nil
+				fn()
+			}
 		})
 	})
 }
 
+// requery reloads for a changed query or tab; until it lands, keyboard copies wait.
+func (a *app) requery() { a.listStale = true; a.reload() }
+
 // changed is called after the data changed: reload the list and tray data.
 func (a *app) changed() {
 	a.preview = history.Entry{}
-	a.reload()
+	if a.panel == nil || a.panel.IsVisible() {
+		a.reload()
+	}
 	a.refreshData()
 	if a.settingsWin != nil {
 		a.refreshStats()
@@ -319,6 +338,8 @@ func (a *app) changed() {
 
 // refreshData reloads what the tray menu and tooltip show.
 func (a *app) refreshData() {
+	a.trayGen++
+	gen := a.trayGen
 	a.async(func() {
 		recent, err1 := a.store.Recent(a.ctx, 10)
 		pinned, err2 := a.store.Pinned(a.ctx, 20)
@@ -334,6 +355,9 @@ func (a *app) refreshData() {
 			snips = snips[:30]
 		}
 		a.post(func() {
+			if gen != a.trayGen {
+				return
+			}
 			a.trayRecent, a.trayPinned, a.traySnippets = recent, pinned, snips
 			a.counts.entries, a.counts.pinned, a.counts.snippets = e, p, s
 			a.refreshTray()
@@ -373,16 +397,18 @@ func (a *app) loadPreview() {
 		if e.Kind == history.KindText {
 			stats, code = textStats(e.Text), looksLikeCode(e.Text)
 		}
+		var bmp *ui.Bitmap
+		if e.Kind == history.KindImage {
+			// DecodeBitmap only builds pixels and touches no window or GPU state (mygo ui/bitmap.go).
+			bmp, _ = ui.DecodeBitmap(e.Image)
+		}
 		a.post(func() {
 			if gen != a.previewGen {
 				return
 			}
 			a.preview = e
 			a.previewStats, a.previewCode = stats, code
-			a.previewBitmap = nil
-			if e.Kind == history.KindImage {
-				a.previewBitmap, _ = ui.DecodeBitmap(e.Image)
-			}
+			a.previewBitmap = bmp
 		})
 	})
 }
@@ -434,6 +460,8 @@ func (a *app) command(args []string, second bool) (shown bool) {
 
 var defaultShortcuts = []string{"Alt+Shift+V", "CmdOrCtrl+Alt+Shift+V"}
 
+func (a *app) onHotkey() { a.post(func() { a.toggle(fromHotkey) }) }
+
 func (a *app) registerShortcut() {
 	cands := defaultShortcuts
 	if a.cfg.Shortcut != "" {
@@ -441,7 +469,7 @@ func (a *app) registerShortcut() {
 	}
 	a.shortcut, a.shortcutErr = "", ""
 	for _, s := range cands {
-		if err := mygo.GlobalShortcut.Register(s, func() { a.post(func() { a.toggle(fromHotkey) }) }); err != nil {
+		if err := mygo.GlobalShortcut.Register(s, a.onHotkey); err != nil {
 			slog.Warn("shortcut unavailable", "accelerator", s, "err", err)
 			a.shortcutErr = err.Error()
 			continue
@@ -458,24 +486,31 @@ func (a *app) applyShortcut(acc string) error {
 	if old != "" {
 		mygo.GlobalShortcut.Unregister(old)
 	}
+	restore := func() {
+		if old == "" {
+			return
+		}
+		if err := mygo.GlobalShortcut.Register(old, a.onHotkey); err != nil {
+			slog.Warn("shortcut restore failed", "accelerator", old, "err", err)
+			a.shortcut, a.shortcutErr = "", err.Error()
+			return
+		}
+		a.shortcut = old
+	}
 	if acc == "" {
 		prev := a.cfg.Shortcut
 		a.cfg.Shortcut = ""
 		a.registerShortcut()
 		if a.shortcut == "" {
 			a.cfg.Shortcut = prev
-			if old != "" {
-				_ = mygo.GlobalShortcut.Register(old, func() { a.post(func() { a.toggle(fromHotkey) }) })
-				a.shortcut = old
-			}
-			return errors.New(a.shortcutErr)
+			failure := errors.New(a.shortcutErr)
+			restore()
+			return failure
 		}
 		return nil
 	}
-	if err := mygo.GlobalShortcut.Register(acc, func() { a.post(func() { a.toggle(fromHotkey) }) }); err != nil {
-		if old != "" {
-			_ = mygo.GlobalShortcut.Register(old, func() { a.post(func() { a.toggle(fromHotkey) }) })
-		}
+	if err := mygo.GlobalShortcut.Register(acc, a.onHotkey); err != nil {
+		restore()
 		return err
 	}
 	a.shortcut, a.shortcutErr = acc, ""

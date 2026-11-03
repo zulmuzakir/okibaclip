@@ -33,8 +33,8 @@ flowchart LR
   - The UI highlights matches with `search.Highlight` (byte ranges), rendered as `ui.RichText` spans in `app.highlighted`.
   - The search field takes Enter, so `OnTextKey` copies the chosen row on ↵ / ⇧↵ (plain).
 - **Copy-back (`copy.go`):**
-  - Calls `mon.Suppress(hash)` *before* `a.writeClipboard`, so the next poll can't record the app's own write. Suppression drops one matching capture within 3 s. Keep this order.
-  - Text writes use `a.suppressText(text)`.
+  - `a.write(hash, d)` calls `mon.Suppress(hash)` *before* `a.writeClipboard` so the next poll can't record the app's own write, and `mon.Unsuppress`es it if the write fails. A suppression drops one matching capture within 3 s; several can be pending. Keep this order.
+  - Text writes hash with `textHash(text)`; file writes with `filesHash(paths actually written)`.
   - When `MoveToTopOnCopy` is on, `copyEntry` doesn't suppress on purpose; it `Touch`es the entry after a successful write instead.
 - **CLI (`app.command`):** a second launch forwards `--toggle|--show|--hide|--settings|--pause|--resume|--quit` to the running instance. A bare launch shows the panel.
 - **Export/import (`exportimport.go`, `internal/history/export.go`):**
@@ -104,7 +104,7 @@ Format with `gofmt`. There is no other linter.
 
 ## Important Files
 
-- `main.go`: entry point, single-instance lock, data-folder migration, Linux backend selection.
+- `main.go`: entry point, single-instance lock, Linux backend selection.
 - `app.go`: the `app` struct, `ready()`, `command()` (CLI flags), shortcut handling, `captureControl`.
 - `panel.go`, `panel_snippets.go`: panel UI (search, tabs, list, preview, context menu, snippet editor).
 - `copy.go`: clipboard write-back and suppression.

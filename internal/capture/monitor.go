@@ -25,18 +25,23 @@ type monitorConfig struct {
 	patterns []*regexp.Regexp
 }
 
+const (
+	ignoreWindow    = 2 * time.Minute
+	maxCaptureTries = 3
+)
+
 // Monitor polls the clipboard and records what it finds.
 type Monitor struct {
 	src         Source
 	store       *history.Store
 	settings    atomic.Pointer[monitorConfig]
 	pausedUntil atomic.Int64 // unix ms; MaxInt64 until resumed; 0 not paused
-	ignoreNext  atomic.Bool
+	ignoreUntil atomic.Int64 // unix ms; 0 none
 	suppress    struct {
-		mu    sync.Mutex
-		hash  string
-		until time.Time
+		mu sync.Mutex
+		m  map[string]time.Time // hash -> expiry
 	}
+	wake     chan struct{} // Resume nudges Run to re-baseline at once
 	onChange func()
 	now      func() time.Time
 
@@ -48,11 +53,14 @@ type Monitor struct {
 	imgHashAt time.Time
 	started   bool
 	wasPaused bool
+
+	captureFails int // consecutive store.Capture failures for the pending change
 }
 
 // New returns a Monitor that records src into store.
 func New(src Source, store *history.Store, s settings.Settings, onChange func()) *Monitor {
-	m := &Monitor{src: src, store: store, onChange: onChange, now: time.Now}
+	m := &Monitor{src: src, store: store, onChange: onChange, now: time.Now, wake: make(chan struct{}, 1)}
+	m.suppress.m = map[string]time.Time{}
 	if m.onChange == nil {
 		m.onChange = func() {}
 	}
@@ -85,6 +93,10 @@ func (m *Monitor) Pause(d time.Duration) {
 
 func (m *Monitor) Resume() {
 	m.pausedUntil.Store(0)
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
 	m.onChange()
 }
 
@@ -101,27 +113,42 @@ func (m *Monitor) Paused() (bool, time.Time) {
 	return true, time.UnixMilli(p)
 }
 
-func (m *Monitor) IgnoreNext() { m.ignoreNext.Store(true) }
+func (m *Monitor) IgnoreNext() { m.ignoreUntil.Store(m.now().Add(ignoreWindow).UnixMilli()) }
 
-// Suppress drops the next capture with this hash, within 3 s.
+// takeIgnore consumes the Ignore Next Copy request, reporting whether it is live.
+func (m *Monitor) takeIgnore() bool {
+	u := m.ignoreUntil.Swap(0)
+	return u != 0 && m.now().UnixMilli() < u
+}
+
+// Suppress drops the next capture with this hash within 3 s; several may be pending.
 func (m *Monitor) Suppress(hash string) {
 	m.suppress.mu.Lock()
-	m.suppress.hash, m.suppress.until = hash, m.now().Add(3*time.Second)
+	m.suppress.m[hash] = m.now().Add(3 * time.Second)
+	m.suppress.mu.Unlock()
+}
+
+// Unsuppress lifts a pending Suppress, e.g. after the write it guarded failed.
+func (m *Monitor) Unsuppress(hash string) {
+	m.suppress.mu.Lock()
+	delete(m.suppress.m, hash)
 	m.suppress.mu.Unlock()
 }
 
 func (m *Monitor) takeSuppressed(hash string) bool {
 	m.suppress.mu.Lock()
 	defer m.suppress.mu.Unlock()
-	if m.suppress.hash == "" {
-		return false
+	now := m.now()
+	for h, until := range m.suppress.m {
+		if !now.Before(until) {
+			delete(m.suppress.m, h)
+		}
 	}
-	live := m.now().Before(m.suppress.until)
-	match := live && m.suppress.hash == hash
-	if match || !live {
-		m.suppress.hash = ""
+	if _, ok := m.suppress.m[hash]; ok {
+		delete(m.suppress.m, hash)
+		return true
 	}
-	return match
+	return false
 }
 
 // Run polls until ctx ends.
@@ -136,6 +163,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-m.wake:
 		}
 		if p := m.cfg().PollMillis; p != poll {
 			poll = p
@@ -175,13 +203,17 @@ func (m *Monitor) fingerprint(formats []transfer.Format) string {
 		b.WriteString(string(f))
 		b.WriteByte('\n')
 	}
-	if hasFormat(formats, transfer.Text) {
-		if d, err := m.src.Read(transfer.Text); err == nil {
-			t, _ := d.Read(transfer.Text)
-			sum := sha256.Sum256(t)
+	for _, f := range []transfer.Format{transfer.FileList, transfer.URIList, transfer.Text, transfer.HTML} {
+		if !hasFormat(formats, f) {
+			continue
+		}
+		if p, err := m.src.ReadFormat(f); err == nil {
+			sum := sha256.Sum256(p)
 			b.WriteString(hex.EncodeToString(sum[:]))
 		}
-	} else if hasFormat(formats, transfer.PNG) {
+		return b.String()
+	}
+	if hasFormat(formats, transfer.PNG) {
 		if m.now().Sub(m.imgHashAt) >= time.Second || m.imgHash == "" {
 			if d, err := m.src.Read(transfer.PNG); err == nil {
 				p, _ := d.Read(transfer.PNG)
@@ -251,10 +283,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 	if cfg.SkipSensitive && IsSensitive(m.src.NativeFormats(), formats, m.src.ReadFormat) {
 		slog.Info("capture skipped", "reason", "sensitive")
-		update()
-		return
-	}
-	if m.ignoreNext.Swap(false) {
+		m.takeIgnore()
 		update()
 		return
 	}
@@ -272,6 +301,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		wanted = append(wanted, f)
 	}
 	if len(wanted) == 0 {
+		m.takeIgnore()
 		update()
 		return
 	}
@@ -285,14 +315,20 @@ func (m *Monitor) tick(ctx context.Context) {
 		return
 	}
 	c, reason, ok := Classify(data, wanted, cfg.Settings, cfg.patterns)
-	update()
 	if !ok {
+		m.takeIgnore() // a user copy that was skipped anyway
+		update()
 		if reason != "" {
 			slog.Info("capture skipped", "reason", reason)
 		}
 		return
 	}
 	if m.takeSuppressed(c.Hash()) {
+		update()
+		return
+	}
+	if m.takeIgnore() {
+		update()
 		return
 	}
 	var thumb []byte
@@ -300,6 +336,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		thumb, err = history.MakeThumb(c.Image)
 		if err != nil {
 			slog.Info("capture skipped", "reason", "thumbnail", "err", err)
+			update()
 			return
 		}
 	}
@@ -307,8 +344,15 @@ func (m *Monitor) tick(ctx context.Context) {
 		if ctx.Err() == nil {
 			slog.Error("store capture", "err", err)
 		}
-		return
+		m.captureFails++
+		if m.captureFails >= maxCaptureTries {
+			m.captureFails = 0
+			update()
+		}
+		return // not marked seen: the next tick retries
 	}
+	m.captureFails = 0
+	update()
 	if _, err := m.store.Prune(ctx, cfg.MaxEntries, time.Duration(cfg.RetentionDays)*24*time.Hour, m.now()); err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
 	}

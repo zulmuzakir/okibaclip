@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo/plugins/sqlite"
@@ -95,16 +96,35 @@ func (s *Store) Import(ctx context.Context, f ExportFile) (entries, snippets, du
 		stmts = stmts[:0]
 		return err
 	}
+	now := ms(time.Now())
 	for _, e := range f.Entries {
 		switch e.Kind {
 		case KindText, KindLink, KindColor, KindFiles, KindImage:
 		default:
 			continue
 		}
-		c := Capture{Kind: e.Kind, Text: e.Text, HTML: e.HTML, Image: e.Image, Width: e.Width, Height: e.Height}
 		if (e.Kind == KindImage) != (len(e.Image) > 0) {
 			continue
 		}
+		switch e.Kind {
+		case KindText, KindLink, KindColor:
+			e.Kind = TextKind(e.Text)
+		case KindFiles:
+			if strings.TrimSpace(e.Text) == "" {
+				continue
+			}
+		}
+		var thumb []byte
+		if e.Kind == KindImage {
+			var terr error
+			thumb, terr = MakeThumb(e.Image)
+			if terr != nil {
+				continue
+			}
+		} else if len(e.Text) > MaxTextBytes {
+			continue
+		}
+		c := Capture{Kind: e.Kind, Text: e.Text, HTML: e.HTML, Image: e.Image, Width: e.Width, Height: e.Height}
 		hash := c.Hash()
 		existing := seen[hash]
 		if !existing {
@@ -120,26 +140,22 @@ func (s *Store) Import(ctx context.Context, f ExportFile) (entries, snippets, du
 			entries++
 		}
 		seen[hash] = true
-		var thumb []byte
-		if e.Kind == KindImage {
-			thumb, _ = MakeThumb(e.Image)
-		}
 		var html any
 		if e.HTML != "" {
 			html = e.HTML
 		}
 		usedAt := e.UsedAt
-		if usedAt == 0 {
-			usedAt = ms(time.Now())
+		if usedAt <= 0 || usedAt > now {
+			usedAt = now
 		}
 		created := e.CreatedAt
-		if created == 0 {
+		if created <= 0 || created > usedAt {
 			created = usedAt
 		}
 		count := max(e.UseCount, 1)
 		stmts = append(stmts, sqlite.Statement{
 			SQL: `INSERT INTO entries (kind,text,search,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(hash) DO UPDATE SET pinned=max(pinned,excluded.pinned), used_at=max(used_at,excluded.used_at), use_count=use_count+excluded.use_count`,
+ON CONFLICT(hash) DO UPDATE SET pinned=max(pinned,excluded.pinned), used_at=max(used_at,excluded.used_at), use_count=max(use_count,excluded.use_count)`,
 			Args: []any{string(e.Kind), e.Text, searchText(e.Text), html, nullable(e.Image), nullable(thumb), e.Width, e.Height, c.Size(), hash, e.Pinned, created, usedAt, count},
 		})
 		if len(stmts) >= 200 {

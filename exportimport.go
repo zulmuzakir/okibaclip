@@ -4,50 +4,56 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/egoist/mygo"
 
+	"okibaclip/internal/fsutil"
 	"okibaclip/internal/history"
 )
 
 // exportTo writes the whole history and snippets to path as JSON.
-func (a *app) exportTo(ctx context.Context, path string) error {
+func (a *app) exportTo(ctx context.Context, path string) (size int, err error) {
 	f, err := a.store.Export(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return os.WriteFile(path, b, 0o600)
+	if err := fsutil.WriteFileAtomic(path, b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 // importFrom merges an export file into the store and applies retention.
-func (a *app) importFrom(ctx context.Context, path string, maxEntries int, retention time.Duration) (entries, snippets, dupes int, err error) {
-	st, err := os.Stat(path)
+func (a *app) importFrom(ctx context.Context, path string, maxEntries int, retention time.Duration) (entries, snippets, dupes int, pruned int64, err error) {
+	fh, err := os.Open(path)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	if st.Size() > history.MaxImportSize {
-		return 0, 0, 0, fmt.Errorf("file is larger than %d MiB", history.MaxImportSize>>20)
-	}
-	b, err := os.ReadFile(path)
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, history.MaxImportSize+1))
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
+	}
+	if len(b) > history.MaxImportSize {
+		return 0, 0, 0, 0, fmt.Errorf("file is larger than %d MiB", history.MaxImportSize>>20)
 	}
 	f, err := history.DecodeExport(b)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	entries, snippets, dupes, err = a.store.Import(ctx, f)
 	if err != nil {
 		return
 	}
-	_, err = a.store.Prune(ctx, maxEntries, retention, time.Now())
+	pruned, err = a.store.Prune(ctx, maxEntries, retention, time.Now())
 	return
 }
 
@@ -72,9 +78,11 @@ func (a *app) exportData() {
 			return
 		}
 		msg := "Exported to " + path
-		if err := a.exportTo(a.ctx, path); err != nil {
+		if size, err := a.exportTo(a.ctx, path); err != nil {
 			slog.Error("export", "err", err)
 			msg = "Export failed: " + err.Error()
+		} else if size > history.MaxImportSize {
+			msg += fmt.Sprintf(" (warning: %d MiB is over the %d MiB import limit)", size>>20, history.MaxImportSize>>20)
 		}
 		a.postSettings(func() { a.settingsUI.toast = msg })
 	})
@@ -93,13 +101,17 @@ func (a *app) importData() {
 		if err != nil || len(paths) == 0 {
 			return
 		}
-		e, s, d, err := a.importFrom(a.ctx, paths[0], maxEntries, retention)
+		e, s, d, pruned, err := a.importFrom(a.ctx, paths[0], maxEntries, retention)
 		if err != nil {
 			mygo.Dialog.Error("Import failed", err.Error())
 			return
 		}
 		a.postSettings(func() {
-			a.settingsUI.toast = fmt.Sprintf("Imported %d entries and %d snippets (%d duplicates merged)", e, s, d)
+			msg := fmt.Sprintf("Imported %d entries and %d snippets (%d duplicates merged)", e, s, d)
+			if pruned > 0 {
+				msg += fmt.Sprintf("; %d entries removed by history limits", pruned)
+			}
+			a.settingsUI.toast = msg
 			a.changed()
 		})
 	})

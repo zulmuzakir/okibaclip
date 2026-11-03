@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"path/filepath"
 	"slices"
 
 	"context"
@@ -33,8 +34,10 @@ func (f *fakeClip) Token() (uint64, bool) {
 }
 func (f *fakeClip) Formats() []transfer.Format { f.mu.Lock(); defer f.mu.Unlock(); return f.formats }
 func (f *fakeClip) NativeFormats() []string    { f.mu.Lock(); defer f.mu.Unlock(); return f.native }
-func (f *fakeClip) ReadFormat(transfer.Format) ([]byte, error) {
-	return nil, transfer.ErrFormat
+func (f *fakeClip) ReadFormat(format transfer.Format) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.Read(format)
 }
 func (f *fakeClip) Read(...transfer.Format) (transfer.Data, error) {
 	f.mu.Lock()
@@ -54,6 +57,13 @@ func (f *fakeClip) setText(s string) {
 	defer f.mu.Unlock()
 	f.token++
 	f.data = transfer.TextData(s)
+	f.formats = f.data.Formats()
+}
+func (f *fakeClip) setFiles(paths ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.token++
+	f.data, _ = transfer.FileData(paths...)
 	f.formats = f.data.Formats()
 }
 
@@ -268,5 +278,94 @@ func TestMonitorIgnorePatternSkips(t *testing.T) {
 	s.IgnorePatterns = []string{"("}
 	if err := f.m.SetConfig(s); err == nil {
 		t.Error("bad pattern accepted")
+	}
+}
+
+func textHash(s string) string { return history.Capture{Kind: history.KindText, Text: s}.Hash() }
+
+func TestMonitorFingerprintDetectsFileListChange(t *testing.T) {
+	f := newMonFixture(t, false)
+	dir := t.TempDir()
+	f.clip.setFiles(filepath.Join(dir, "a"))
+	f.tick(t)
+	f.clip.setFiles(filepath.Join(dir, "b"))
+	f.tick(t)
+	if n := len(f.list(t)); n != 2 {
+		t.Errorf("entries = %d, want 2", n)
+	}
+}
+
+func TestMonitorIgnoreNextNotSpentOnOwnWrite(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.m.IgnoreNext()
+	f.m.Suppress(textHash("x"))
+	f.clip.setText("x")
+	f.tick(t)
+	f.clip.setText("y")
+	f.tick(t)
+	f.clip.setText("z")
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"z"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorIgnoreNextExpires(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.m.IgnoreNext()
+	f.now = f.now.Add(3 * time.Minute)
+	f.clip.setText("a")
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"a"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorSuppressHoldsSeveralHashes(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.m.Suppress(textHash("x"))
+	f.m.Suppress(textHash("y"))
+	f.clip.setText("x")
+	f.tick(t)
+	f.clip.setText("y")
+	f.tick(t)
+	if l := f.list(t); len(l) != 0 {
+		t.Errorf("list = %v", l)
+	}
+}
+
+func TestMonitorUnsuppressRecordsCopy(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.m.Suppress(textHash("x"))
+	f.m.Unsuppress(textHash("x"))
+	f.clip.setText("x")
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"x"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorResumeWakesPoll(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.m.Pause(-1)
+	f.m.Resume()
+	select {
+	case <-f.m.wake:
+	default:
+		t.Error("Resume did not wake the poll loop")
+	}
+}
+
+func TestMonitorRetriesAfterStoreError(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("a")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.ctx = canceled
+	f.tick(t)
+	f.ctx = context.Background()
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"a"}) {
+		t.Errorf("not retried: %v", f.list(t))
 	}
 }

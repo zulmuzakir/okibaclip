@@ -199,12 +199,16 @@ func Highlight(text string, terms []Term) []Range {
 	if len(terms) == 0 || text == "" {
 		return nil
 	}
-	runes := []rune(text)
+	runes := make([]rune, 0, len(text))
+	offs := make([]int, 0, len(text)+1)
+	for i, r := range text {
+		runes = append(runes, r)
+		offs = append(offs, i)
+	}
+	offs = append(offs, len(text))
 	low := make([]rune, len(runes))
-	offs := make([]int, len(runes)+1)
 	for i, r := range runes {
 		low[i] = unicode.ToLower(r)
-		offs[i+1] = offs[i] + utf8.RuneLen(r)
 	}
 	var rs []Range
 	for _, t := range terms {

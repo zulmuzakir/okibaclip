@@ -87,6 +87,7 @@ func TestHighlight(t *testing.T) {
 		{"Push to git, then push", []Term{{Text: "push"}}, []string{"Push", "push"}},
 		{"git push", []Term{{Text: "gtpsh"}}, []string{"g", "t", "p", "sh"}}, // adjacent letters merge
 		{"abcdef", []Term{{Text: "bc"}, {Text: "cde"}}, []string{"bcde"}},    // overlapping merge
+		{"\xffpush", []Term{{Text: "push"}}, []string{"push"}},
 		{"Grüße aus Köln", []Term{{Text: "köln"}, {Text: "grüße"}}, []string{"Grüße", "Köln"}},
 		{"nothing here", []Term{{Text: "zzz"}}, nil},
 		{"anything", nil, nil},

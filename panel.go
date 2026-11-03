@@ -86,10 +86,14 @@ func (a *app) setTab(i int) {
 	a.chosen, a.chosenSnippet = 0, 0
 	a.selected.Clear()
 	a.preview, a.previewBitmap, a.previewStats, a.previewCode = history.Entry{}, nil, "", false
-	a.reload()
+	a.requery()
 }
 
 func (a *app) copyChosen(plain bool) {
+	if a.listStale {
+		a.afterList = func() { a.copyChosen(plain) }
+		return
+	}
 	if a.tab == tabSnippets {
 		if s, ok := a.chosenSnip(); ok {
 			a.copySnippet(s)
@@ -107,6 +111,10 @@ func (a *app) copyChosen(plain bool) {
 }
 
 func (a *app) copyNth(n int) {
+	if a.listStale {
+		a.afterList = func() { a.copyNth(n) }
+		return
+	}
 	if a.tab == tabSnippets {
 		if n < len(a.snippets) {
 			a.copySnippet(a.snippets[n])
@@ -154,12 +162,22 @@ func (a *app) saveEditor() {
 		return
 	}
 	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body}
-	a.editor.open, a.editor.err = false, ""
+	if a.editor.saving {
+		return
+	}
+	a.editor.saving, a.editor.err = true, ""
 	a.async(func() {
-		if _, err := a.store.SaveSnippet(a.ctx, sn); err != nil {
-			slog.Error("save snippet", "err", err)
-		}
-		a.post(a.changed)
+		_, err := a.store.SaveSnippet(a.ctx, sn)
+		a.post(func() {
+			a.editor.saving = false
+			if err != nil {
+				slog.Error("save snippet", "err", err)
+				a.editor.err = "Save failed: " + err.Error()
+				return
+			}
+			a.editor.open = false
+			a.changed()
+		})
 	})
 }
 
@@ -211,7 +229,7 @@ func (a *app) view(c *ui.Context) {
 			if in.Changed() {
 				a.chosen, a.chosenSnippet = 0, 0
 				a.selected.Clear()
-				a.reload()
+				a.requery()
 			}
 			if count := a.resultCount(); count != "" {
 				ui.Text(c, count).FontSize(12).TextColor(t.TextMuted)
@@ -265,7 +283,7 @@ func (a *app) shortcuts(c *ui.Context) {
 	if a.query != "" && !a.syntaxOpen && c.Shortcut(0, ui.KeyEscape) {
 		a.query = ""
 		a.chosen, a.chosenSnippet = 0, 0
-		a.reload()
+		a.requery()
 	}
 	if c.Shortcut(0, ui.KeyDown) {
 		a.move(1)
@@ -357,8 +375,11 @@ func (a *app) leading(c *ui.Context, e history.Entry, fg ui.Color) {
 			return
 		}
 	case history.KindColor:
-		ui.Box(c).Size(28, 28).Radius(6).Background(ui.Hex(strings.TrimSpace(e.Text))).Border(1, c.Theme().Border)
-		return
+		if history.TextKind(e.Text) == history.KindColor {
+			// Imports can carry an invalid color; ui.Hex panics on it.
+			ui.Box(c).Size(28, 28).Radius(6).Background(ui.Hex(strings.TrimSpace(e.Text))).Border(1, c.Theme().Border)
+			return
+		}
 	}
 	ui.Icon(c, kindIcon(e.Kind)).FontSize(20).TextColor(fg).Size(28, 28)
 }
@@ -711,6 +732,10 @@ func (a *app) entryMenu(m *ui.Menu, e history.Entry) {
 }
 
 func openLink(u string) {
+	if history.TextKind(u) != history.KindLink {
+		slog.Warn("open link: not an http(s) URL")
+		return
+	}
 	if err := mygo.Shell.OpenExternal(u); err != nil {
 		slog.Error("open link", "err", err)
 	}
@@ -744,7 +769,7 @@ func (a *app) previewPane(c *ui.Context) {
 		ui.Column(c).Gap(8).Children(func() {
 			switch e.Kind {
 			case history.KindImage:
-				if a.previewBitmap != nil {
+				if a.preview.ID == e.ID && a.previewBitmap != nil {
 					ui.Image(c, a.previewBitmap).Fit(ui.Contain).Height(300)
 				} else if b := a.thumb(e); b != nil {
 					ui.Image(c, b).Fit(ui.Contain).Height(300)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,9 +27,10 @@ type panelFixture struct {
 
 // fakeMon records what the app asks of the capture monitor.
 type fakeMon struct {
-	suppressed []string
-	paused     bool
-	resumes    int
+	suppressed   []string
+	unsuppressed []string
+	paused       bool
+	resumes      int
 }
 
 func (m *fakeMon) Pause(time.Duration)               { m.paused = true }
@@ -36,6 +38,7 @@ func (m *fakeMon) Resume()                           { m.paused = false; m.resum
 func (m *fakeMon) Paused() (bool, time.Time)         { return m.paused, time.Time{} }
 func (m *fakeMon) IgnoreNext()                       {}
 func (m *fakeMon) Suppress(h string)                 { m.suppressed = append(m.suppressed, h) }
+func (m *fakeMon) Unsuppress(h string)               { m.unsuppressed = append(m.unsuppressed, h) }
 func (m *fakeMon) SetConfig(settings.Settings) error { return nil }
 
 func newPanelFixture(t *testing.T, items ...string) *panelFixture {
@@ -388,5 +391,81 @@ func TestPanelArrowsSwitchFilterOnlyWhenSearchEmpty(t *testing.T) {
 	f.tt.Frame()
 	if f.a.tab != 0 || f.a.query != "pl" {
 		t.Errorf("← with text switched filter: tab %d, query %q", f.a.tab, f.a.query)
+	}
+}
+
+func TestPanelInvalidColorRowShowsIcon(t *testing.T) {
+	f := newPanelFixture(t)
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindColor, Text: "red"}, historytest.T0)
+	f.a.reload()
+	f.tt.Frame()
+	if !f.tt.HasText("red") {
+		t.Error("row not shown")
+	}
+}
+
+func TestPanelEnterBeforeReloadCopiesNewResults(t *testing.T) {
+	f := newPanelFixture(t, "apple", "banana")
+	var queue []func()
+	f.a.async = func(fn func()) { queue = append(queue, fn) }
+	f.tt.Type("ban")
+	f.tt.Key(0, ui.KeyEnter)
+	if len(f.writes) != 0 {
+		t.Fatalf("copied before results landed: %v", f.written(t))
+	}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		fn()
+	}
+	if got := f.written(t); !slices.Equal(got, []string{"banana"}) {
+		t.Errorf("written = %v", got)
+	}
+}
+
+func TestPanelSnippetSaveFailureKeepsEditor(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.newSnippet("n", "body")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.a.ctx = ctx
+	f.a.saveEditor()
+	if !f.a.editor.open || !strings.HasPrefix(f.a.editor.err, "Save failed") {
+		t.Errorf("open=%v err=%q", f.a.editor.open, f.a.editor.err)
+	}
+}
+
+func TestPanelFilesCopySuppressesWrittenPaths(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.cfg.MoveToTopOnCopy = false
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(real, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindFiles, Text: real + "\n" + filepath.Join(dir, "gone.txt")}, historytest.T0)
+	f.a.reload()
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyEnter)
+	if want := filesHash([]string{real}); !slices.Contains(f.mon.suppressed, want) || len(f.mon.suppressed) != 1 {
+		t.Errorf("suppressed = %v, want [%s]", f.mon.suppressed, want)
+	}
+}
+
+func TestPanelFailedWriteLiftsSuppression(t *testing.T) {
+	f := newPanelFixture(t, "x")
+	f.a.cfg.MoveToTopOnCopy = false
+	f.a.writeClipboard = func(transfer.Data) error { return errors.New("boom") }
+	f.tt.Key(0, ui.KeyEnter)
+	if len(f.mon.suppressed) == 0 || !slices.Equal(f.mon.suppressed, f.mon.unsuppressed) {
+		t.Errorf("suppressed %v, unsuppressed %v", f.mon.suppressed, f.mon.unsuppressed)
+	}
+}
+
+func TestPanelMergeOfDeletedEntriesSaysSo(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.copyMerged([]int64{999, 998})
+	if f.a.toast != "Entries no longer exist" {
+		t.Errorf("toast = %q", f.a.toast)
 	}
 }

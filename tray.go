@@ -96,8 +96,9 @@ func (a *app) buildTrayMenu() *mygo.Menu {
 		&mygo.MenuItem{Label: "Settings…", Click: func(*mygo.MenuItem, *mygo.Window) { a.openSettings() }},
 		&mygo.MenuItem{Label: "Open at Login", Type: mygo.MenuItemCheckbox, ID: "login", Checked: mygo.App.OpenAtLogin(),
 			Click: func(it *mygo.MenuItem, _ *mygo.Window) {
-				if err := mygo.App.SetOpenAtLogin(it.Checked); err != nil {
+				if err := mygo.App.SetOpenAtLogin(it.IsChecked()); err != nil {
 					slog.Error("open at login", "err", err)
+					it.SetChecked(!it.IsChecked())
 				}
 			}},
 		mygo.Separator(),
@@ -118,9 +119,10 @@ func (a *app) refreshTray() {
 	}
 	a.tray.SetToolTip(tip)
 	if paused != a.trayPaused {
-		a.trayPaused = paused
 		if err := a.tray.SetIcon(trayIcon(paused), isDarwin); err != nil {
 			slog.Error("tray icon", "err", err)
+		} else {
+			a.trayPaused = paused
 		}
 	}
 	if !isLinux {

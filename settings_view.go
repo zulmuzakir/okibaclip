@@ -29,6 +29,7 @@ type settingsState struct {
 	loginErr   string
 	toast      string
 	stats      string
+	toggleCmd  string
 }
 
 var settingsTabs = []string{"General", "History", "Data", "About"}
@@ -58,6 +59,29 @@ func (a *app) syncSettingsUI() {
 	}
 	s.shortErr = ""
 	s.login = mygo.App.OpenAtLogin()
+	if isLinux {
+		exe, err := os.Executable()
+		if err != nil {
+			exe = "okibaclip"
+		}
+		s.toggleCmd = shellQuote(exe) + " --toggle"
+	}
+}
+
+// shellQuote quotes s for a POSIX shell unless it is already safe.
+func shellQuote(s string) string {
+	safe := s != ""
+	for i := range len(s) {
+		b := s[i]
+		if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.IndexByte("_./+-", b) >= 0) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (a *app) openSettings() {
@@ -87,6 +111,8 @@ func (a *app) openSettings() {
 }
 
 func (a *app) refreshStats() {
+	a.statsGen++
+	gen := a.statsGen
 	a.async(func() {
 		e, p, s, err := a.store.Counts(a.ctx)
 		if err != nil {
@@ -94,6 +120,9 @@ func (a *app) refreshStats() {
 		}
 		size := humanSize(fileSize(filepath.Join(a.dataDir, "history.db")))
 		a.postSettings(func() {
+			if gen != a.statsGen {
+				return
+			}
 			a.settingsUI.stats = fmt.Sprintf("%d entries · %d pinned · %d snippets · database %s", e, p, s, size)
 		})
 	})
@@ -198,6 +227,7 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 					s.loginErr = err.Error()
 				} else {
 					s.loginErr = ""
+					a.refreshTray()
 				}
 			}
 			if s.loginErr != "" {
@@ -224,12 +254,12 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 		if isLinux {
 			ui.Field(c, "Desktop shortcut", func() {
 				help(c, t, "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs:")
-				exe, _ := os.Executable()
-				cmd := exe + " --toggle"
-				ui.Text(c, cmd).Wrap().Selectable()
+				ui.Text(c, s.toggleCmd).Wrap().Selectable()
 				if ui.Button(c, "Copy Command").Clicked() {
-					a.suppressText(cmd)
-					if err := a.writeClipboard(textData(cmd, "")); err == nil {
+					cmd := s.toggleCmd
+					if err := a.write(textHash(cmd), textData(cmd, "")); err != nil {
+						c.Toast("Copy failed: " + err.Error())
+					} else {
 						c.Toast("Command copied")
 					}
 				}

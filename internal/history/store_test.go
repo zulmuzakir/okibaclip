@@ -322,3 +322,52 @@ func TestDecodeExportRejects(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestImportReclassifiesAndRejectsInvalid(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	f := history.ExportFile{Format: history.ExportFormat, Version: history.ExportVersion, Entries: []history.ExportEntry{
+		{Kind: history.KindColor, Text: "red"},
+		{Kind: history.KindLink, Text: "file:///etc/passwd"},
+		{Kind: history.KindText, Text: strings.Repeat("a", history.MaxTextBytes+1)},
+		{Kind: history.KindImage, Image: []byte("junk")},
+		{Kind: history.KindText, Text: "future", UsedAt: time.Now().Add(1000 * time.Hour).UnixMilli()},
+	}}
+	entries, _, _, err := s.Import(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries != 3 {
+		t.Errorf("entries = %d, want 3", entries)
+	}
+	l, err := s.List(ctx, history.Filter{Tab: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l) != 3 {
+		t.Fatalf("listed %d", len(l))
+	}
+	for _, e := range l {
+		if e.Kind != history.KindText {
+			t.Errorf("%q kind = %v, want text", e.Text, e.Kind)
+		}
+		if e.UsedAt.After(time.Now()) {
+			t.Errorf("%q used in the future: %v", e.Text, e.UsedAt)
+		}
+	}
+}
+
+func TestImportTwiceKeepsUseCount(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	f := history.ExportFile{Format: history.ExportFormat, Version: history.ExportVersion, Entries: []history.ExportEntry{{Kind: history.KindText, Text: "x", UseCount: 5}}}
+	for range 2 {
+		if _, _, _, err := s.Import(ctx, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, _ := s.List(ctx, history.Filter{Tab: "all"})
+	if len(l) != 1 || l[0].UseCount != 5 {
+		t.Errorf("list = %+v", l)
+	}
+}

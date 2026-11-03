@@ -45,21 +45,49 @@ type copyResult struct {
 	err   error
 }
 
-// writeEntry writes e (a full row) to the clipboard.
-func (a *app) writeEntry(e history.Entry, plain bool) copyResult {
+// textHash is the history hash of text as the monitor would capture it.
+func textHash(text string) string {
+	return history.Capture{Kind: history.TextKind(text), Text: text}.Hash()
+}
+
+func filesHash(paths []string) string {
+	return history.Capture{Kind: history.KindFiles, Text: strings.Join(paths, "\n")}.Hash()
+}
+
+// write suppresses hash (if non-empty) before writing d, so the next poll
+// can't record the app's own write; a failed write lifts the suppression.
+func (a *app) write(hash string, d transfer.Data) error {
+	if hash != "" && a.mon != nil {
+		a.mon.Suppress(hash)
+	}
+	err := a.writeClipboard(d)
+	if err != nil && hash != "" && a.mon != nil {
+		a.mon.Unsuppress(hash)
+	}
+	return err
+}
+
+// writeEntry writes e (a full row) to the clipboard. With suppress, the
+// monitor drops the resulting capture; plain file-path text is always dropped.
+func (a *app) writeEntry(e history.Entry, plain, suppress bool) copyResult {
+	h := func(s string) string {
+		if suppress {
+			return s
+		}
+		return ""
+	}
 	switch e.Kind {
 	case history.KindImage:
 		if plain {
 			return copyResult{toast: "Images have no plain text"}
 		}
-		if err := a.writeClipboard(imageData(e.Image)); err != nil {
+		if err := a.write(h(e.Hash), imageData(e.Image)); err != nil {
 			return copyResult{err: err}
 		}
 	case history.KindFiles:
 		paths := strings.Split(e.Text, "\n")
 		if plain {
-			a.suppressText(e.Text)
-			if err := a.writeClipboard(textData(e.Text, "")); err != nil {
+			if err := a.write(textHash(e.Text), textData(e.Text, "")); err != nil {
 				return copyResult{err: err}
 			}
 			break
@@ -72,7 +100,7 @@ func (a *app) writeEntry(e history.Entry, plain bool) copyResult {
 		if err != nil {
 			return copyResult{err: err}
 		}
-		if err := a.writeClipboard(d); err != nil {
+		if err := a.write(h(filesHash(found)), d); err != nil {
 			return copyResult{err: err}
 		}
 		if missing > 0 {
@@ -83,17 +111,11 @@ func (a *app) writeEntry(e history.Entry, plain bool) copyResult {
 		if plain {
 			html = ""
 		}
-		if err := a.writeClipboard(textData(e.Text, html)); err != nil {
+		if err := a.write(h(e.Hash), textData(e.Text, html)); err != nil {
 			return copyResult{err: err}
 		}
 	}
 	return copyResult{ok: true}
-}
-
-func (a *app) suppressText(text string) {
-	if a.mon != nil {
-		a.mon.Suppress(history.Capture{Kind: history.TextKind(text), Text: text}.Hash())
-	}
 }
 
 // finishCopy runs on the main thread after a write.
@@ -121,10 +143,7 @@ func (a *app) copyEntry(e history.Entry, plain bool) {
 			a.post(func() { a.finishCopy(copyResult{err: err}) })
 			return
 		}
-		if !moveToTop && a.mon != nil && !(plain && full.Kind == history.KindFiles) {
-			a.mon.Suppress(full.Hash)
-		}
-		r := a.writeEntry(full, plain)
+		r := a.writeEntry(full, plain, !moveToTop)
 		if r.ok && moveToTop {
 			if err := a.store.Touch(a.ctx, e.ID, time.Now()); err != nil {
 				slog.Error("touch", "err", err)
@@ -162,7 +181,11 @@ func (a *app) copyMerged(ids []int64) {
 			}
 		}
 		if len(texts) == 0 {
-			a.post(func() { a.finishCopy(copyResult{toast: "Images skipped"}) })
+			toast := "Entries no longer exist"
+			if skippedImages {
+				toast = "Images skipped"
+			}
+			a.post(func() { a.finishCopy(copyResult{toast: toast}) })
 			return
 		}
 		var r copyResult
@@ -174,7 +197,7 @@ func (a *app) copyMerged(ids []int64) {
 			}
 			d, err := transfer.FileData(found...)
 			if err == nil {
-				err = a.writeClipboard(d)
+				err = a.write(filesHash(found), d)
 			}
 			r = copyResult{ok: err == nil, err: err}
 			if missing > 0 {
@@ -182,8 +205,7 @@ func (a *app) copyMerged(ids []int64) {
 			}
 		} else {
 			text := strings.Join(texts, "\n")
-			a.suppressText(text)
-			err := a.writeClipboard(textData(text, ""))
+			err := a.write(textHash(text), textData(text, ""))
 			r = copyResult{ok: err == nil, err: err}
 		}
 		if skippedImages && r.toast == "" {
@@ -206,15 +228,13 @@ func (a *app) copyTransformed(e history.Entry, t transform.Transform) {
 			a.post(func() { a.toast = fmt.Sprintf("%s: %v", t.Name, err) })
 			return
 		}
-		a.suppressText(out)
-		err = a.writeClipboard(textData(out, ""))
+		err = a.write(textHash(out), textData(out, ""))
 		a.post(func() { a.finishCopy(copyResult{ok: err == nil, err: err}) })
 	})
 }
 
 func (a *app) copySnippet(s history.Snippet) {
-	a.suppressText(s.Body)
-	err := a.writeClipboard(textData(s.Body, ""))
+	err := a.write(textHash(s.Body), textData(s.Body, ""))
 	a.finishCopy(copyResult{ok: err == nil, err: err})
 }
 
