@@ -1,0 +1,6 @@
+{
+  "name": "my-clipboard",
+  "identifier": "com.example.myclipboard",
+  "version": "0.1.0",
+  "out": "build"
+}
