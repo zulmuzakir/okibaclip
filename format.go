@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"my-clipboard/internal/history"
+	"pastello/internal/history"
 )
 
 // preview is the single-line description of an entry.

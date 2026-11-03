@@ -11,8 +11,11 @@ import (
 
 const (
 	// ExportFormat identifies export files.
-	ExportFormat  = "my-clipboard-export"
-	ExportVersion = 1
+	ExportFormat = "pastello-export"
+	// legacyExportFormat identifies export files written before the app
+	// was renamed from my-clipboard; their content is identical.
+	legacyExportFormat = "my-clipboard-export"
+	ExportVersion      = 1
 	// MaxImportSize is the largest export file Import accepts, in bytes.
 	MaxImportSize = 512 << 20
 )
@@ -51,8 +54,8 @@ func DecodeExport(b []byte) (ExportFile, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return f, err
 	}
-	if f.Format != ExportFormat {
-		return f, fmt.Errorf("not a my-clipboard export (format %q)", f.Format)
+	if f.Format != ExportFormat && f.Format != legacyExportFormat {
+		return f, fmt.Errorf("not a pastello export (format %q)", f.Format)
 	}
 	if f.Version != ExportVersion {
 		return f, fmt.Errorf("unsupported export version %d", f.Version)

@@ -4,9 +4,9 @@ import (
 	"slices"
 
 	"context"
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/history/historytest"
-	"my-clipboard/internal/settings"
+	"pastello/internal/history"
+	"pastello/internal/history/historytest"
+	"pastello/internal/settings"
 	"sync"
 	"testing"
 	"time"

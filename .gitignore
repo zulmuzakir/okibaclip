@@ -1,8 +1,8 @@
 /build/
 /.mygo/
 mygo_windows_*.syso
-/my-clipboard
-/my-clipboard.exe
+/pastello
+/pastello.exe
 .DS_Store
 *.test
 *.out

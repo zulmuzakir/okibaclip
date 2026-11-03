@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"my-clipboard/internal/history"
+	"pastello/internal/history"
 )
 
 // T0 is a fixed point in time for test data.

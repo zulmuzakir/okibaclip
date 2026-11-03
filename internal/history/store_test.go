@@ -4,9 +4,9 @@ import (
 	"slices"
 
 	"context"
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/history/historytest"
 	"os"
+	"pastello/internal/history"
+	"pastello/internal/history/historytest"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -229,12 +229,14 @@ func TestExportImportRoundTrip(t *testing.T) {
 }
 
 func TestDecodeExportRejects(t *testing.T) {
-	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"my-clipboard-export","version":2}`} {
+	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"pastello-export","version":2}`} {
 		if _, err := history.DecodeExport([]byte(in)); err == nil {
 			t.Errorf("accepted %s", in)
 		}
 	}
-	if _, err := history.DecodeExport([]byte(`{"format":"my-clipboard-export","version":1,"entries":[],"snippets":[]}`)); err != nil {
-		t.Error(err)
+	for _, format := range []string{"pastello-export", "my-clipboard-export"} {
+		if _, err := history.DecodeExport([]byte(`{"format":"` + format + `","version":1,"entries":[],"snippets":[]}`)); err != nil {
+			t.Errorf("%s: %v", format, err)
+		}
 	}
 }

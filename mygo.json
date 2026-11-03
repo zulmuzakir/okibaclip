@@ -1,6 +1,6 @@
 {
-  "name": "my-clipboard",
-  "identifier": "com.example.myclipboard",
+  "name": "pastello",
+  "identifier": "io.github.zulmuzakir.pastello",
   "version": "0.1.0",
   "out": "build",
   "macos": { "infoPlist": { "LSUIElement": true } },

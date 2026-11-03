@@ -10,7 +10,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
-	"my-clipboard/internal/settings"
+	"pastello/internal/settings"
 )
 
 type settingsState struct {
@@ -66,7 +66,7 @@ func (a *app) openSettings() {
 	}
 	if a.settingsWin == nil {
 		a.settingsWin = mygo.NewWindow(mygo.WindowOptions{
-			Title:    "my-clipboard Settings",
+			Title:    "pastello Settings",
 			Width:    560,
 			Height:   640,
 			StateKey: "settings",
@@ -309,7 +309,7 @@ func (a *app) dataSection(c *ui.Context, t *ui.Theme) {
 }
 
 func (a *app) aboutSection(c *ui.Context, t *ui.Theme) {
-	ui.Text(c, "my-clipboard "+mygo.App.Version()).Bold().FontSize(16)
+	ui.Text(c, "pastello "+mygo.App.Version()).Bold().FontSize(16)
 	ui.Text(c, "Data folder: "+a.dataDir).Wrap().Selectable()
 	status := "Tray: OK"
 	if a.trayErr != "" {
@@ -319,10 +319,10 @@ func (a *app) aboutSection(c *ui.Context, t *ui.Theme) {
 	}
 	ui.Text(c, status).Wrap()
 	if isDarwin {
-		help(c, t, "If macOS asks, choose Always Allow for my-clipboard (System Settings › Privacy & Security › Paste from Other Apps)")
+		help(c, t, "If macOS asks, choose Always Allow for pastello (System Settings › Privacy & Security › Paste from Other Apps)")
 	}
 	if a.waylandMode == "wayland" {
-		help(c, t, "Native Wayland: copies are recorded only while a my-clipboard window is focused.")
+		help(c, t, "Native Wayland: copies are recorded only while a pastello window is focused.")
 	}
 }
 

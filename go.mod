@@ -1,4 +1,4 @@
-module my-clipboard
+module pastello
 
 go 1.27.3
 

@@ -5,8 +5,8 @@ import (
 	"image/png"
 	"testing"
 
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/history/historytest"
+	"pastello/internal/history"
+	"pastello/internal/history/historytest"
 )
 
 func TestHashDistinguishesKinds(t *testing.T) {

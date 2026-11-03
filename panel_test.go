@@ -12,9 +12,9 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/history/historytest"
-	"my-clipboard/internal/settings"
+	"pastello/internal/history"
+	"pastello/internal/history/historytest"
+	"pastello/internal/settings"
 )
 
 type panelFixture struct {

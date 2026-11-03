@@ -14,9 +14,9 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
-	"my-clipboard/internal/capture"
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/settings"
+	"pastello/internal/capture"
+	"pastello/internal/history"
+	"pastello/internal/settings"
 )
 
 type origin int
@@ -125,13 +125,13 @@ func newApp() *app {
 func (a *app) ready() {
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
-		mygo.Dialog.Error("my-clipboard", "Cannot find the data folder: "+err.Error())
+		mygo.Dialog.Error("pastello", "Cannot find the data folder: "+err.Error())
 		mygo.App.Quit()
 		return
 	}
 	a.dataDir = dir
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		mygo.Dialog.Error("my-clipboard", "Cannot create "+dir+": "+err.Error())
+		mygo.Dialog.Error("pastello", "Cannot create "+dir+": "+err.Error())
 		mygo.App.Quit()
 		return
 	}
@@ -145,13 +145,13 @@ func (a *app) ready() {
 	a.ctx, a.cancel = ctx, cancel
 	a.store, err = history.Open(ctx, filepath.Join(dir, "history.db"))
 	if err != nil {
-		mygo.Dialog.Error("my-clipboard", "Cannot open history: "+err.Error())
+		mygo.Dialog.Error("pastello", "Cannot open history: "+err.Error())
 		mygo.App.Quit()
 		return
 	}
 
 	a.panel = mygo.NewWindow(mygo.WindowOptions{
-		Title:         "my-clipboard",
+		Title:         "pastello",
 		Panel:         true,
 		Hidden:        true,
 		Frameless:     true,

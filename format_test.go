@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"my-clipboard/internal/history"
+	"pastello/internal/history"
 )
 
 func TestPreviewFormats(t *testing.T) {

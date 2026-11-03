@@ -10,7 +10,7 @@ import (
 
 	"github.com/egoist/mygo"
 
-	"my-clipboard/internal/history"
+	"pastello/internal/history"
 )
 
 // exportTo writes the whole history and snippets to path as JSON.
@@ -65,7 +65,7 @@ func (a *app) exportData() {
 		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
 			Parent:      parent,
 			Title:       "Export clipboard history",
-			DefaultPath: "my-clipboard-export-" + time.Now().Format("2006-01-02") + ".json",
+			DefaultPath: "pastello-export-" + time.Now().Format("2006-01-02") + ".json",
 			Filters:     []mygo.FileFilter{{Name: "JSON", Extensions: []string{"json"}}},
 		})
 		if err != nil || path == "" {

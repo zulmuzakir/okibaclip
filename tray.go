@@ -7,7 +7,7 @@ import (
 
 	"github.com/egoist/mygo"
 
-	"my-clipboard/internal/history"
+	"pastello/internal/history"
 )
 
 func (a *app) setupTray() {
@@ -15,7 +15,7 @@ func (a *app) setupTray() {
 		ID:             "main",
 		Icon:           trayIcon(false),
 		IconIsTemplate: isDarwin,
-		ToolTip:        "my-clipboard",
+		ToolTip:        "pastello",
 	})
 	if err != nil {
 		a.trayErr = err.Error()
@@ -112,9 +112,9 @@ func (a *app) refreshTray() {
 		return
 	}
 	paused, _ := a.paused()
-	tip := fmt.Sprintf("my-clipboard — %d items", a.counts.entries)
+	tip := fmt.Sprintf("pastello — %d items", a.counts.entries)
 	if paused {
-		tip = "my-clipboard — paused"
+		tip = "pastello — paused"
 	}
 	a.tray.SetToolTip(tip)
 	if paused != a.trayPaused {

@@ -10,8 +10,8 @@ import (
 
 	"github.com/egoist/mygo/transfer"
 
-	"my-clipboard/internal/history"
-	"my-clipboard/internal/settings"
+	"pastello/internal/history"
+	"pastello/internal/settings"
 )
 
 const maxHTMLBytes = 1 << 20
