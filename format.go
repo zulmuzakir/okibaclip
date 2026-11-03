@@ -36,6 +36,14 @@ func preview(e history.Entry) string {
 // rowLines are the two lines of an entry's list row: what it holds, then
 // its second line of text, or else its kind and a detail.
 func rowLines(e history.Entry) (title, detail string) {
+	title, detail = rowLinesOf(e)
+	if e.Title != "" {
+		return e.Title, title
+	}
+	return title, detail
+}
+
+func rowLinesOf(e history.Entry) (title, detail string) {
 	switch e.Kind {
 	case history.KindImage:
 		return "Image", fmt.Sprintf("%d×%d · %s", e.Width, e.Height, humanSize(e.Size))
@@ -109,6 +117,9 @@ func details(e history.Entry, stats string, now time.Time) string {
 	}
 	if e.UseCount > 1 {
 		parts = append(parts, fmt.Sprintf("used %d×", e.UseCount))
+	}
+	if e.SourceName != "" {
+		parts = append(parts, "from "+e.SourceName)
 	}
 	parts = append(parts, "last used "+ago(now, e.UsedAt), "first copied "+e.CreatedAt.Format("Jan 2, 2006 15:04"))
 	return strings.Join(parts, " · ")

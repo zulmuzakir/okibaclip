@@ -25,6 +25,7 @@ type fakeClip struct {
 	data     transfer.Data
 	readErrs []error
 	reads    int
+	owner    Owner
 }
 
 func (f *fakeClip) Token() (uint64, bool) {
@@ -34,6 +35,7 @@ func (f *fakeClip) Token() (uint64, bool) {
 }
 func (f *fakeClip) Formats() []transfer.Format { f.mu.Lock(); defer f.mu.Unlock(); return f.formats }
 func (f *fakeClip) NativeFormats() []string    { f.mu.Lock(); defer f.mu.Unlock(); return f.native }
+func (f *fakeClip) Owner() Owner               { f.mu.Lock(); defer f.mu.Unlock(); return f.owner }
 func (f *fakeClip) ReadFormat(format transfer.Format) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -367,5 +369,44 @@ func TestMonitorRetriesAfterStoreError(t *testing.T) {
 	f.tick(t)
 	if !slices.Equal(f.list(t), []string{"a"}) {
 		t.Errorf("not retried: %v", f.list(t))
+	}
+}
+
+func TestMonitorRecordsSourceApp(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.owner = Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack", Path: "/Applications/Slack.app"}
+	f.clip.setText("hello")
+	f.tick(t)
+	l, err := f.store.List(f.ctx, history.Filter{Tab: "all"})
+	if err != nil || len(l) != 1 {
+		t.Fatalf("list = %v, %v", l, err)
+	}
+	if l[0].SourceApp != "com.tinyspeck.slackmacgap" || l[0].SourceName != "Slack" {
+		t.Errorf("source = %q / %q", l[0].SourceApp, l[0].SourceName)
+	}
+	missing, _ := f.store.AppIconsMissing(f.ctx)
+	if len(missing) != 1 || missing[0].Path != "/Applications/Slack.app" {
+		t.Errorf("icons to fetch = %+v", missing)
+	}
+}
+
+func TestMonitorSkipsIgnoredApp(t *testing.T) {
+	f := newMonFixture(t, true)
+	s := settings.Default()
+	s.IgnoreApps = []string{"slack"}
+	if err := f.m.SetConfig(s); err != nil {
+		t.Fatal(err)
+	}
+	f.clip.owner = Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack"}
+	f.clip.setText("from slack")
+	f.tick(t)
+	if l := f.list(t); len(l) != 0 {
+		t.Errorf("recorded %v", l)
+	}
+	f.clip.owner = Owner{App: "org.mozilla.firefox", Name: "Firefox"}
+	f.clip.setText("from firefox")
+	f.tick(t)
+	if l := f.list(t); !slices.Equal(l, []string{"from firefox"}) {
+		t.Errorf("list = %v", l)
 	}
 }

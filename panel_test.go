@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
@@ -23,6 +24,8 @@ type panelFixture struct {
 	tt     *ui.Tester
 	writes []transfer.Data
 	mon    *fakeMon
+	paster *fakePaster
+	keys   *fakeHotkeys
 }
 
 // fakeMon records what the app asks of the capture monitor.
@@ -41,6 +44,33 @@ func (m *fakeMon) Suppress(h string)                 { m.suppressed = append(m.s
 func (m *fakeMon) Unsuppress(h string)               { m.unsuppressed = append(m.unsuppressed, h) }
 func (m *fakeMon) SetConfig(settings.Settings) error { return nil }
 
+// fakePaster records paste requests.
+type fakePaster struct {
+	trusted   bool
+	remembers int
+	pastes    []int
+}
+
+func (p *fakePaster) Remember()            { p.remembers++ }
+func (p *fakePaster) Trusted(bool) bool    { return p.trusted }
+func (p *fakePaster) Paste(left int) error { p.pastes = append(p.pastes, left); return nil }
+
+// fakeHotkeys records global shortcut registrations.
+type fakeHotkeys struct {
+	registered   []string
+	unregistered []string
+	fail         map[string]error
+}
+
+func (h *fakeHotkeys) Register(acc string, _ func()) error {
+	if err := h.fail[acc]; err != nil {
+		return err
+	}
+	h.registered = append(h.registered, acc)
+	return nil
+}
+func (h *fakeHotkeys) Unregister(acc string) { h.unregistered = append(h.unregistered, acc) }
+
 func newPanelFixture(t *testing.T, items ...string) *panelFixture {
 	t.Helper()
 	f := &panelFixture{}
@@ -51,6 +81,12 @@ func newPanelFixture(t *testing.T, items ...string) *panelFixture {
 	a.writeClipboard = func(d transfer.Data) error { f.writes = append(f.writes, d); return nil }
 	f.mon = &fakeMon{}
 	a.mon = f.mon
+	f.paster = &fakePaster{}
+	a.paster = f.paster
+	f.keys = &fakeHotkeys{}
+	a.hotkeys = f.keys
+	a.fileIcon = func(string, int) ([]byte, error) { return nil, errors.New("no icon") }
+	a.saveDialog = func(mygo.SaveDialogOptions) (string, error) { return "", nil }
 	f.a = a
 	for i, s := range items {
 		historytest.Add(t, a.store, history.Capture{Kind: history.KindText, Text: s}, historytest.T0.Add(time.Duration(i)*time.Second))
@@ -467,5 +503,175 @@ func TestPanelMergeOfDeletedEntriesSaysSo(t *testing.T) {
 	f.a.copyMerged([]int64{999, 998})
 	if f.a.toast != "Entries no longer exist" {
 		t.Errorf("toast = %q", f.a.toast)
+	}
+}
+
+func TestPanelReorderPinned(t *testing.T) {
+	f := newPanelFixture(t, "alpha", "bravo", "charlie")
+	ctx := context.Background()
+	for _, e := range f.a.items {
+		f.a.store.SetPinned(ctx, e.ID, true)
+	}
+	if err := f.tt.Click("Pinned"); err != nil {
+		t.Fatal(err)
+	}
+	f.tt.Frame()
+	order := func() []string { l, _ := f.a.store.Pinned(ctx, 10); return historytest.Texts(l) }
+	if want := []string{"alpha", "bravo", "charlie"}; !slices.Equal(order(), want) {
+		t.Fatalf("pin order = %v, want %v", order(), want)
+	}
+	first, ok1 := f.tt.Find("alpha")
+	last, ok2 := f.tt.Find("charlie")
+	if !ok1 || !ok2 {
+		t.Fatalf("rows not found: %q", f.tt.Texts())
+	}
+	f.tt.Press(last.X+last.W/2, last.Y+last.H/2)
+	f.tt.Move(last.X+last.W/2, last.Y+last.H/2-10)
+	f.tt.Move(first.X+first.W/2, first.Y)
+	f.tt.Release(first.X+first.W/2, first.Y)
+	f.tt.Frame()
+	if want := []string{"charlie", "alpha", "bravo"}; !slices.Equal(order(), want) {
+		t.Errorf("after drag: %v, want %v", order(), want)
+	}
+	if got := historytest.Texts(f.a.items); !slices.Equal(got, []string{"charlie", "alpha", "bravo"}) {
+		t.Errorf("list = %v", got)
+	}
+}
+
+func TestPanelEditEntry(t *testing.T) {
+	f := newPanelFixture(t, "old text", "other")
+	if err := f.tt.RightClick("old text"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tt.ChooseMenuItem("Edit…"); err != nil {
+		t.Fatal(err)
+	}
+	f.tt.Frame()
+	if !f.tt.HasText("Edit Entry") {
+		t.Fatalf("modal not open: %q", f.tt.Texts())
+	}
+	f.tt.Click("Text")
+	f.tt.Key(ui.Cmd, ui.KeyA)
+	f.tt.Type("new text")
+	if err := f.tt.Click("Save"); err != nil {
+		t.Fatal(err)
+	}
+	f.tt.Frame()
+	if !f.tt.HasText("new text") || f.tt.HasText("old text") {
+		t.Errorf("rows: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelSnippetCursorPastes(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.cfg.PasteAfterCopy, f.a.pasteOK, f.paster.trusted = true, true, true
+	if _, err := f.a.store.SaveSnippet(context.Background(), history.Snippet{Name: "greet", Body: "Hi {cursor}!"}); err != nil {
+		t.Fatal(err)
+	}
+	f.a.setTab(tabSnippets)
+	f.tt.Frame()
+	f.tt.Key(0, ui.KeyEnter)
+	if got := f.written(t); !slices.Equal(got, []string{"Hi !"}) {
+		t.Fatalf("written = %q", got)
+	}
+	if !slices.Equal(f.paster.pastes, []int{1}) {
+		t.Errorf("pastes = %v, want one paste moving left 1", f.paster.pastes)
+	}
+}
+
+func TestPanelPasteNeedsOptInAndTrust(t *testing.T) {
+	f := newPanelFixture(t, "x")
+	f.a.pasteOK, f.paster.trusted = true, true
+	f.tt.Key(0, ui.KeyEnter)
+	if len(f.paster.pastes) != 0 {
+		t.Errorf("pasted with the setting off: %v", f.paster.pastes)
+	}
+	f.a.cfg.PasteAfterCopy, f.paster.trusted = true, false
+	f.tt.Key(0, ui.KeyEnter)
+	if len(f.paster.pastes) != 0 || !strings.Contains(f.a.hint, "Accessibility") {
+		t.Errorf("pastes %v, hint %q", f.paster.pastes, f.a.hint)
+	}
+}
+
+func TestPanelSnippetShortcutConflict(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.shortcut = "Alt+Shift+V"
+	f.a.newSnippet("n", "body")
+	f.a.editor.shortcut = "alt+shift+v"
+	f.a.saveEditor()
+	if f.a.editor.err != "That shortcut opens the panel" || !f.a.editor.open {
+		t.Errorf("err = %q", f.a.editor.err)
+	}
+	if len(f.keys.registered) != 0 {
+		t.Errorf("registered %v", f.keys.registered)
+	}
+	f.a.editor.shortcut = "CmdOrCtrl+Alt+1"
+	f.a.saveEditor()
+	if f.a.editor.open || !slices.Equal(f.keys.registered, []string{"CmdOrCtrl+Alt+1"}) {
+		t.Errorf("open=%v err=%q registered=%v", f.a.editor.open, f.a.editor.err, f.keys.registered)
+	}
+	// Another snippet can't take it.
+	f.a.newSnippet("m", "body")
+	f.a.editor.shortcut = "CmdOrCtrl+Alt+1"
+	f.a.saveEditor()
+	if f.a.editor.err != "That shortcut belongs to another snippet" {
+		t.Errorf("err = %q", f.a.editor.err)
+	}
+}
+
+func TestPanelSnippetShortcutUnavailableKeepsEditor(t *testing.T) {
+	f := newPanelFixture(t)
+	f.keys.fail = map[string]error{"CmdOrCtrl+Alt+2": errors.New("taken")}
+	f.a.newSnippet("n", "body")
+	f.a.editor.shortcut = "CmdOrCtrl+Alt+2"
+	f.a.saveEditor()
+	if !f.a.editor.open || f.a.editor.err != "Shortcut unavailable: taken" {
+		t.Errorf("open=%v err=%q", f.a.editor.open, f.a.editor.err)
+	}
+	if sn, _ := f.a.store.Snippets(context.Background(), nil); len(sn) != 0 {
+		t.Error("snippet saved despite the unavailable shortcut")
+	}
+}
+
+func TestPanelCopyImageAsFile(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.dataDir = t.TempDir()
+	png := historytest.PNG(t, 6, 6)
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindImage, Image: png, Width: 6, Height: 6}, historytest.T0)
+	f.a.reload()
+	e := f.a.items[0]
+	f.a.copyImageFile(e)
+	if len(f.writes) != 1 {
+		t.Fatalf("writes = %d (toast %q)", len(f.writes), f.a.toast)
+	}
+	files, err := f.writes[0].Files()
+	want := filepath.Join(f.a.dataDir, "files", "Image-"+e.Hash[:12]+".png")
+	if err != nil || len(files) != 1 || files[0] != want {
+		t.Fatalf("files = %v, %v; want %s", files, err, want)
+	}
+	if b, err := os.ReadFile(want); err != nil || !slices.Equal(b, png) {
+		t.Errorf("file contents: %v", err)
+	}
+	if !slices.Contains(f.mon.suppressed, filesHash([]string{want})) {
+		t.Error("file write not suppressed")
+	}
+}
+
+func TestPanelRenamePinnedShowsTitle(t *testing.T) {
+	f := newPanelFixture(t, "192.168.0.1")
+	ctx := context.Background()
+	f.a.store.SetPinned(ctx, f.a.items[0].ID, true)
+	f.a.reload()
+	f.tt.Frame()
+	f.a.openEntryEdit(f.a.items[0], true)
+	f.tt.Frame()
+	if !f.tt.HasText("Rename Pinned Entry") {
+		t.Fatalf("modal: %q", f.tt.Texts())
+	}
+	f.a.edit.value = "Router"
+	f.tt.Click("Save")
+	f.tt.Frame()
+	if !f.tt.HasText("Router") {
+		t.Errorf("title not shown: %q", f.tt.Texts())
 	}
 }

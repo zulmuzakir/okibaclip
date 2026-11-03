@@ -131,6 +131,7 @@ func (a *app) newSnippet(name, body string) {
 		a.setTab(tabSnippets)
 	}
 	a.editor.open, a.editor.id, a.editor.name, a.editor.body, a.editor.err = true, 0, name, body, ""
+	a.editor.folder, a.editor.shortcut = "", ""
 }
 
 func (a *app) saveAsSnippet(e history.Entry) {
@@ -161,19 +162,53 @@ func (a *app) saveEditor() {
 		a.editor.err = "Body is over 1 MiB"
 		return
 	}
-	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body}
+	acc := strings.TrimSpace(a.editor.shortcut)
+	if acc != "" {
+		if strings.EqualFold(acc, a.shortcut) {
+			a.editor.err = "That shortcut opens the panel"
+			return
+		}
+		if id, ok := a.snipKeys[acc]; ok && id != a.editor.id {
+			a.editor.err = "That shortcut belongs to another snippet"
+			return
+		}
+	}
+	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body, Folder: firstRunes(strings.TrimSpace(a.editor.folder), 100), Shortcut: acc}
 	if a.editor.saving {
 		return
 	}
+	old := ""
+	for k, id := range a.snipKeys {
+		if id == a.editor.id {
+			old = k
+		}
+	}
+	newly := acc != "" && acc != old
+	if newly {
+		if err := a.hotkeys.Register(acc, func() { a.post(func() { a.fireSnippet(acc) }) }); err != nil {
+			a.editor.err = "Shortcut unavailable: " + err.Error()
+			return
+		}
+	}
 	a.editor.saving, a.editor.err = true, ""
 	a.async(func() {
-		_, err := a.store.SaveSnippet(a.ctx, sn)
+		id, err := a.store.SaveSnippet(a.ctx, sn)
 		a.post(func() {
 			a.editor.saving = false
 			if err != nil {
 				slog.Error("save snippet", "err", err)
 				a.editor.err = "Save failed: " + err.Error()
+				if newly {
+					a.hotkeys.Unregister(acc)
+				}
 				return
+			}
+			if old != "" && old != acc {
+				a.hotkeys.Unregister(old)
+				delete(a.snipKeys, old)
+			}
+			if acc != "" {
+				a.snipKeys[acc] = id
 			}
 			a.editor.open = false
 			a.changed()
@@ -274,10 +309,11 @@ func (a *app) view(c *ui.Context) {
 		})
 	})
 	a.editorModal(c)
+	a.entryEditModal(c)
 }
 
 func (a *app) shortcuts(c *ui.Context) {
-	if a.editor.open {
+	if a.editor.open || a.edit.open {
 		return
 	}
 	if a.query != "" && !a.syntaxOpen && c.Shortcut(0, ui.KeyEscape) {
@@ -321,6 +357,12 @@ func (a *app) shortcuts(c *ui.Context) {
 }
 
 func (a *app) deleteSnippet(s history.Snippet) {
+	for acc, id := range a.snipKeys {
+		if id == s.ID {
+			a.hotkeys.Unregister(acc)
+			delete(a.snipKeys, acc)
+		}
+	}
 	a.async(func() {
 		if err := a.store.DeleteSnippet(a.ctx, s.ID); err != nil {
 			slog.Error("delete snippet", "err", err)
@@ -352,7 +394,7 @@ func (a *app) banners(c *ui.Context) {
 			}
 		})
 	}
-	if a.waylandMode == "wayland" {
+	if a.waylandMode == "wayland" && !a.waylandCapture {
 		line("Native Wayland: copies are recorded only while this window is focused.", "", nil)
 	}
 	if paused, until := a.paused(); paused {
@@ -462,6 +504,7 @@ var syntaxRows = [][2]string{
 	{"is:pinned", "or is:unpinned"},
 	{"after:7d", "Last used since: 12h, 3d, 2w, today, yesterday, 2026-01-31"},
 	{"before:2026-01-31", "Last used before that day"},
+	{"app:slack", "Copied from that app (name, bundle ID or executable)"},
 }
 
 // iconButton is a borderless button showing icon in fg, named label for
@@ -595,7 +638,7 @@ func (a *app) footerStatus() string {
 func (a *app) noMatches(c *ui.Context) {
 	tips := []string{"Try fewer or shorter words."}
 	if a.shown.HasFilters() {
-		tips = append(tips, "Or remove a filter: type:, is:, after:, before:.")
+		tips = append(tips, "Or remove a filter: type:, is:, app:, after:, before:.")
 	}
 	if a.tab != 0 && a.tab != tabSnippets {
 		tips = append(tips, "Or search All instead of "+tabLabels[a.tab]+".")
@@ -611,6 +654,10 @@ func (a *app) historyList(c *ui.Context) {
 	a.list.Label = func(i int) string { return preview(a.items[i]) }
 	a.list.Selected = &a.chosen
 	now := time.Now()
+	a.list.Reorder = nil
+	if a.tab == tabPinned && a.query == "" {
+		a.list.Reorder = func(rows []int, to int) { a.pending = func() { a.reorderPinned(rows, to) } }
+	}
 	list := ui.List(c.Key("history"), &a.list, len(a.items)).
 		ItemKey(func(i int) any { return a.items[i].ID }).
 		Selection(&a.selected).
@@ -662,7 +709,12 @@ func (a *app) row(r ui.ListRow, now time.Time) {
 			a.highlighted(c, detail, hl).FontSize(11).SingleLine().TextColor(muted)
 		})
 		ui.Column(c).Gap(4).AlignItems(ui.End).Children(func() {
-			ui.Text(c, relTime(now, e.UsedAt)).FontSize(11).TextColor(muted)
+			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
+				if b := a.appIcons[e.SourceApp]; b != nil {
+					ui.Image(c, b).Size(12, 12)
+				}
+				ui.Text(c, relTime(now, e.UsedAt)).FontSize(11).TextColor(muted)
+			})
 			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
 				if e.Pinned {
 					ui.Icon(c, iconPin).FontSize(12).TextColor(muted)
@@ -709,12 +761,28 @@ func (a *app) entryMenu(m *ui.Menu, e history.Entry) {
 			}
 		})
 	}
+	if e.Kind == history.KindText || e.Kind == history.KindLink || e.Kind == history.KindColor {
+		if m.Item("Edit…").Chosen() {
+			a.pending = func() { a.openEntryEdit(e, false) }
+		}
+	}
 	label := "Pin"
 	if e.Pinned {
 		label = "Unpin"
 	}
 	if m.Item(label).Chosen() {
 		a.pending = func() { a.setPinned(e.ID, !e.Pinned) }
+	}
+	if e.Pinned && m.Item("Rename…").Chosen() {
+		a.pending = func() { a.openEntryEdit(e, true) }
+	}
+	if e.Kind == history.KindImage {
+		if m.Item("Save Image As…").Chosen() {
+			a.pending = func() { a.saveImage(e) }
+		}
+		if m.Item("Copy as File").Chosen() {
+			a.pending = func() { a.copyImageFile(e) }
+		}
 	}
 	if e.Kind != history.KindImage && m.Item("Save as Snippet…").Chosen() {
 		a.pending = func() { a.saveAsSnippet(e) }

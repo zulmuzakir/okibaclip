@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/egoist/mygo/plugins/sqlite"
 
+	"okibaclip/internal/fsutil"
 	"okibaclip/internal/search"
 )
 
@@ -26,11 +25,51 @@ type Filter struct {
 	Limit int
 }
 
-var migrationV1 = []string{
-	`CREATE TABLE entries (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', search TEXT NOT NULL DEFAULT '', html TEXT, image BLOB, thumb BLOB, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL, hash TEXT NOT NULL UNIQUE, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, used_at INTEGER NOT NULL, use_count INTEGER NOT NULL DEFAULT 1)`,
-	`CREATE INDEX entries_order ON entries(pinned DESC, used_at DESC)`,
-	`CREATE TABLE snippets (id INTEGER PRIMARY KEY, name TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-	`PRAGMA user_version = 1`,
+// migrations[i] upgrades the schema from version i to i+1. Each runs in one
+// transaction together with the version bump.
+var migrations = [][]string{
+	{ // v1
+		`CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', search TEXT NOT NULL DEFAULT '', html TEXT, image BLOB, thumb BLOB, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, size INTEGER NOT NULL, hash TEXT NOT NULL UNIQUE, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, used_at INTEGER NOT NULL, use_count INTEGER NOT NULL DEFAULT 1)`,
+		`CREATE INDEX IF NOT EXISTS entries_order ON entries(pinned DESC, used_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS snippets (id INTEGER PRIMARY KEY, name TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+	},
+	{ // v2
+		`ALTER TABLE entries ADD COLUMN source_app TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE entries ADD COLUMN source_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE entries ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE entries ADD COLUMN pin_order INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE entries SET pin_order = -used_at WHERE pinned = 1`,
+		`CREATE TABLE IF NOT EXISTS app_icons (app TEXT PRIMARY KEY, path TEXT NOT NULL, icon BLOB, fetched INTEGER NOT NULL DEFAULT 0)`,
+		`ALTER TABLE snippets ADD COLUMN folder TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snippets ADD COLUMN shortcut TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snippets ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE snippets ADD COLUMN used_at INTEGER NOT NULL DEFAULT 0`,
+	},
+}
+
+func migrate(ctx context.Context, db *sqlite.DB) error {
+	rows, err := db.Query(ctx, "PRAGMA user_version")
+	if err != nil {
+		return err
+	}
+	cur := 0
+	if len(rows.Values) > 0 {
+		cur = int(asInt(rows.Values[0][0]))
+	}
+	if cur > len(migrations) {
+		return fmt.Errorf("history.db has schema v%d, newer than this Okiba Clip supports (v%d)", cur, len(migrations))
+	}
+	for v := cur; v < len(migrations); v++ {
+		var stmts []sqlite.Statement
+		for _, q := range migrations[v] {
+			stmts = append(stmts, sqlite.Statement{SQL: q})
+		}
+		stmts = append(stmts, sqlite.Statement{SQL: fmt.Sprintf("PRAGMA user_version = %d", v+1)})
+		if _, err := db.Transaction(ctx, stmts); err != nil {
+			return fmt.Errorf("migrate to v%d: %w", v+1, err)
+		}
+	}
+	return nil
 }
 
 // Open opens (and migrates) the history database at path.
@@ -39,27 +78,30 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(path, 0o600); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-	s := &Store{db: db}
-	rows, err := db.Query(ctx, "PRAGMA user_version")
-	if err != nil {
+	fail := func(err error) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if len(rows.Values) == 0 || asInt(rows.Values[0][0]) < 1 {
-		for _, stmt := range migrationV1 {
-			if _, err := db.Execute(ctx, stmt); err != nil {
-				db.Close()
-				return nil, fmt.Errorf("migrate: %w", err)
-			}
+	if err := fsutil.Restrict(path); err != nil {
+		return fail(err)
+	}
+	// On a fresh file this takes effect; older files are converted below.
+	if _, err := db.Execute(ctx, "PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
+		return fail(err)
+	}
+	if err := migrate(ctx, db); err != nil {
+		return fail(err)
+	}
+	rows, err := db.Query(ctx, "PRAGMA auto_vacuum")
+	if err != nil {
+		return fail(err)
+	}
+	if len(rows.Values) == 0 || asInt(rows.Values[0][0]) != 2 {
+		if _, err := db.Execute(ctx, "VACUUM"); err != nil {
+			return fail(fmt.Errorf("vacuum: %w", err))
 		}
 	}
-	return s, nil
+	return &Store{db: db}, nil
 }
 
 // Close closes the database.
@@ -111,14 +153,24 @@ func searchText(text string) string {
 	return l
 }
 
-const listCols = `id,kind,substr(text,1,4000),thumb,width,height,size,hash,pinned,created_at,used_at,use_count`
-const fullCols = `id,kind,text,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count`
+// searchFor is the search column of an entry: its title (when named), then
+// its text.
+func searchFor(title, text string) string {
+	if title == "" {
+		return searchText(text)
+	}
+	return strings.ToLower(title) + "\n" + searchText(text)
+}
+
+const listCols = `id,kind,substr(text,1,4000),thumb,width,height,size,hash,pinned,created_at,used_at,use_count,title,pin_order,source_app,source_name`
+const fullCols = `id,kind,text,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count,title,pin_order,source_app,source_name`
 
 func scanList(row []any) Entry {
 	return Entry{
 		ID: asInt(row[0]), Kind: Kind(asString(row[1])), Text: asString(row[2]), Thumb: asBytes(row[3]),
 		Width: int(asInt(row[4])), Height: int(asInt(row[5])), Size: asInt(row[6]), Hash: asString(row[7]),
 		Pinned: asInt(row[8]) != 0, CreatedAt: fromMs(asInt(row[9])), UsedAt: fromMs(asInt(row[10])), UseCount: int(asInt(row[11])),
+		Title: asString(row[12]), PinOrder: asInt(row[13]), SourceApp: asString(row[14]), SourceName: asString(row[15]),
 	}
 }
 
@@ -128,6 +180,7 @@ func scanFull(row []any) Entry {
 		Image: asBytes(row[4]), Thumb: asBytes(row[5]),
 		Width: int(asInt(row[6])), Height: int(asInt(row[7])), Size: asInt(row[8]), Hash: asString(row[9]),
 		Pinned: asInt(row[10]) != 0, CreatedAt: fromMs(asInt(row[11])), UsedAt: fromMs(asInt(row[12])), UseCount: int(asInt(row[13])),
+		Title: asString(row[14]), PinOrder: asInt(row[15]), SourceApp: asString(row[16]), SourceName: asString(row[17]),
 	}
 }
 
@@ -144,16 +197,23 @@ func (s *Store) Capture(ctx context.Context, c Capture, thumb []byte, now time.T
 	if c.HTML != "" {
 		html = c.HTML
 	}
-	rows, err := s.db.Query(ctx, `INSERT INTO entries (kind,text,search,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count)
-VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,1)
-ON CONFLICT(hash) DO UPDATE SET used_at=excluded.used_at, use_count=use_count+1
+	rows, err := s.db.Query(ctx, `INSERT INTO entries (kind,text,search,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count,source_app,source_name)
+VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,1,?,?)
+ON CONFLICT(hash) DO UPDATE SET used_at=excluded.used_at, use_count=use_count+1,
+  source_app=CASE WHEN excluded.source_app!='' THEN excluded.source_app ELSE source_app END,
+  source_name=CASE WHEN excluded.source_name!='' THEN excluded.source_name ELSE source_name END
 RETURNING id, (use_count = 1)`,
-		string(c.Kind), c.Text, searchText(c.Text), html, nullable(c.Image), nullable(thumb), c.Width, c.Height, c.Size(), c.Hash(), ms(now), ms(now))
+		string(c.Kind), c.Text, searchText(c.Text), html, nullable(c.Image), nullable(thumb), c.Width, c.Height, c.Size(), c.Hash(), ms(now), ms(now), c.SourceApp, c.SourceName)
 	if err != nil {
 		return 0, false, err
 	}
 	if len(rows.Values) != 1 {
 		return 0, false, errors.New("capture: no row returned")
+	}
+	if c.SourceApp != "" && c.SourcePath != "" {
+		if _, err := s.db.Execute(ctx, `INSERT INTO app_icons(app,path) VALUES(?,?) ON CONFLICT(app) DO UPDATE SET path=excluded.path, fetched=0, icon=NULL WHERE path!=excluded.path`, c.SourceApp, c.SourcePath); err != nil {
+			return 0, false, err
+		}
 	}
 	return asInt(rows.Values[0][0]), asInt(rows.Values[0][1]) != 0, nil
 }
@@ -175,7 +235,7 @@ func tabClause(tab string) string {
 }
 
 // List returns the entries matching f. Without search words they come pinned
-// first, then by last use; with them, best match first, in that order among
+// first (in pin order), then by last use; with them, best match first, in that order among
 // equal matches.
 func (s *Store) List(ctx context.Context, f Filter) ([]Entry, error) {
 	if f.Limit <= 0 {
@@ -202,6 +262,14 @@ func (s *Store) List(ctx context.Context, f Filter) ([]Entry, error) {
 		where = append(where, "used_at<?")
 		args = append(args, ms(q.Before))
 	}
+	if len(q.Apps) > 0 {
+		var parts []string
+		for _, a := range q.Apps {
+			parts = append(parts, `instr(lower(source_app), ?) > 0 OR instr(lower(source_name), ?) > 0`)
+			args = append(args, a, a)
+		}
+		where = append(where, "("+strings.Join(parts, " OR ")+")")
+	}
 	// Rows hold only the start of their text, so each word also reports
 	// whether the whole text has it; fuzzy candidates are narrowed with
 	// LIKE '%w%o%r%d%' and confirmed by search.Score. With words, the limit
@@ -225,7 +293,7 @@ func (s *Store) List(ctx context.Context, f Filter) ([]Entry, error) {
 		args = append(args, f.Limit)
 	}
 	args = append(colArgs, args...)
-	rows, err := s.db.Query(ctx, `SELECT `+cols+` FROM entries WHERE `+strings.Join(where, " AND ")+` ORDER BY pinned DESC, used_at DESC`+limit, args...)
+	rows, err := s.db.Query(ctx, `SELECT `+cols+` FROM entries WHERE `+strings.Join(where, " AND ")+` ORDER BY `+orderBy+limit, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -306,10 +374,90 @@ func (s *Store) Touch(ctx context.Context, id int64, now time.Time) error {
 	return err
 }
 
-// SetPinned pins or unpins an entry.
+// SetPinned pins or unpins an entry. New pins go to the top of the pinned
+// order; unpinning forgets the pin's name.
 func (s *Store) SetPinned(ctx context.Context, id int64, pinned bool) error {
-	_, err := s.db.Execute(ctx, `UPDATE entries SET pinned=? WHERE id=?`, pinned, id)
+	if pinned {
+		_, err := s.db.Execute(ctx, `UPDATE entries SET pinned=1, pin_order=(SELECT coalesce(min(pin_order),0)-1 FROM entries WHERE pinned=1) WHERE id=? AND pinned=0`, id)
+		return err
+	}
+	e, err := s.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Execute(ctx, `UPDATE entries SET pinned=0, pin_order=0, title='', search=? WHERE id=?`, searchFor("", e.Text), id)
 	return err
+}
+
+// SetTitle names an entry; an empty title clears the name. The title is
+// searchable.
+func (s *Store) SetTitle(ctx context.Context, id int64, title string) error {
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	title = strings.TrimSpace(title)
+	_, err = s.db.Execute(ctx, `UPDATE entries SET title=?, search=? WHERE id=?`, title, searchFor(title, e.Text), id)
+	return err
+}
+
+// ReorderPinned sets the pinned order to ids, first to last.
+func (s *Store) ReorderPinned(ctx context.Context, ids []int64) error {
+	stmts := make([]sqlite.Statement, len(ids))
+	for i, id := range ids {
+		stmts[i] = sqlite.Statement{SQL: `UPDATE entries SET pin_order=? WHERE id=? AND pinned=1`, Args: []any{i, id}}
+	}
+	_, err := s.db.Transaction(ctx, stmts)
+	return err
+}
+
+// UpdateText replaces the text of a text entry and returns the id that now
+// holds it. When the edited text equals another entry's, the two merge into
+// that one (pinned if either was) and its id is returned.
+func (s *Store) UpdateText(ctx context.Context, id int64, text string, now time.Time) (int64, error) {
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if e.Kind == KindImage || e.Kind == KindFiles {
+		return 0, errors.New("only text entries can be edited")
+	}
+	k := TextKind(text)
+	c := Capture{Kind: k, Text: text}
+	h := c.Hash()
+	if h == e.Hash {
+		return id, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT id FROM entries WHERE hash=? AND id!=?`, h, id)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows.Values) > 0 {
+		oid := asInt(rows.Values[0][0])
+		o, err := s.Get(ctx, oid)
+		if err != nil {
+			return 0, err
+		}
+		title := o.Title
+		if title == "" {
+			title = e.Title
+		}
+		_, err = s.db.Transaction(ctx, []sqlite.Statement{
+			{SQL: `UPDATE entries SET pin_order=CASE WHEN pinned=0 AND ?=1 THEN (SELECT coalesce(min(pin_order),0)-1 FROM entries WHERE pinned=1) ELSE pin_order END, pinned=max(pinned,?), used_at=?, use_count=use_count+1, title=?, search=? WHERE id=?`,
+				Args: []any{e.Pinned, e.Pinned, ms(now), title, searchFor(title, o.Text), oid}},
+			{SQL: `DELETE FROM entries WHERE id=?`, Args: []any{id}},
+		})
+		if err != nil {
+			return 0, err
+		}
+		return oid, nil
+	}
+	_, err = s.db.Execute(ctx, `UPDATE entries SET kind=?, text=?, html=NULL, size=?, hash=?, search=?, used_at=? WHERE id=?`,
+		string(k), text, c.Size(), h, searchFor(e.Title, text), ms(now), id)
+	return id, err
 }
 
 // Delete removes entries and returns their full rows, for undo.
@@ -342,8 +490,8 @@ func (s *Store) Restore(ctx context.Context, entries []Entry) error {
 			html = e.HTML
 		}
 		stmts = append(stmts, sqlite.Statement{
-			SQL:  `INSERT OR IGNORE INTO entries (id,kind,text,search,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			Args: []any{e.ID, string(e.Kind), e.Text, searchText(e.Text), html, nullable(e.Image), nullable(e.Thumb), e.Width, e.Height, e.Size, e.Hash, e.Pinned, ms(e.CreatedAt), ms(e.UsedAt), e.UseCount},
+			SQL:  `INSERT OR IGNORE INTO entries (id,kind,text,search,html,image,thumb,width,height,size,hash,pinned,created_at,used_at,use_count,title,pin_order,source_app,source_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			Args: []any{e.ID, string(e.Kind), e.Text, searchFor(e.Title, e.Text), html, nullable(e.Image), nullable(e.Thumb), e.Width, e.Height, e.Size, e.Hash, e.Pinned, ms(e.CreatedAt), ms(e.UsedAt), e.UseCount, e.Title, e.PinOrder, e.SourceApp, e.SourceName},
 		})
 	}
 	_, err := s.db.Transaction(ctx, stmts)
@@ -360,19 +508,57 @@ func (s *Store) Clear(ctx context.Context, keepPinned bool) (int64, error) {
 	return r.Changes, err
 }
 
-// Prune applies the retention rules to unpinned entries.
-func (s *Store) Prune(ctx context.Context, max int, retention time.Duration, now time.Time) (int64, error) {
+// Limits are the retention rules Prune applies to unpinned entries.
+type Limits struct {
+	MaxEntries int
+	Retention  time.Duration
+	MaxBytes   int64 // 0 = unlimited
+}
+
+// rowBytes is the stored size of an entry row's content.
+const rowBytes = `size + coalesce(length(CAST(html AS BLOB)),0) + coalesce(length(thumb),0)`
+
+// Prune applies the retention rules to unpinned entries. Pinned entries
+// count toward MaxBytes but are never removed, and the newest unpinned entry
+// always stays.
+func (s *Store) Prune(ctx context.Context, l Limits, now time.Time) (int64, error) {
 	var total int64
-	if retention > 0 {
-		r, err := s.db.Execute(ctx, `DELETE FROM entries WHERE pinned=0 AND used_at < ?`, ms(now.Add(-retention)))
+	if l.Retention > 0 {
+		r, err := s.db.Execute(ctx, `DELETE FROM entries WHERE pinned=0 AND used_at < ?`, ms(now.Add(-l.Retention)))
 		if err != nil {
 			return total, err
 		}
 		total += r.Changes
 	}
-	r, err := s.db.Execute(ctx, `DELETE FROM entries WHERE pinned=0 AND id NOT IN (SELECT id FROM entries WHERE pinned=0 ORDER BY used_at DESC LIMIT ?)`, max)
+	r, err := s.db.Execute(ctx, `DELETE FROM entries WHERE pinned=0 AND id NOT IN (SELECT id FROM entries WHERE pinned=0 ORDER BY used_at DESC LIMIT ?)`, l.MaxEntries)
+	total += r.Changes
+	if err != nil || l.MaxBytes <= 0 {
+		return total, err
+	}
+	r, err = s.db.Execute(ctx, `DELETE FROM entries WHERE pinned=0
+  AND id != (SELECT id FROM entries WHERE pinned=0 ORDER BY used_at DESC, id DESC LIMIT 1)
+  AND id IN (SELECT id FROM (SELECT id, SUM(`+rowBytes+`)
+        OVER (ORDER BY pinned DESC, used_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS run FROM entries) WHERE run > ?)`, l.MaxBytes)
 	total += r.Changes
 	return total, err
+}
+
+// Compact returns space freed by deletions to the file system.
+func (s *Store) Compact(ctx context.Context) error {
+	_, err := s.db.Query(ctx, "PRAGMA incremental_vacuum")
+	return err
+}
+
+// Usage is the stored size of the history's content.
+type Usage struct{ Bytes, ImageBytes int64 }
+
+// Usage sums the content, HTML and thumbnail bytes of every entry.
+func (s *Store) Usage(ctx context.Context) (Usage, error) {
+	rows, err := s.db.Query(ctx, `SELECT coalesce(SUM(`+rowBytes+`),0), coalesce(SUM(CASE WHEN kind='image' THEN `+rowBytes+` ELSE 0 END),0) FROM entries`)
+	if err != nil || len(rows.Values) == 0 {
+		return Usage{}, err
+	}
+	return Usage{Bytes: asInt(rows.Values[0][0]), ImageBytes: asInt(rows.Values[0][1])}, nil
 }
 
 // Recent returns the n most recently used entries.
@@ -384,14 +570,17 @@ func (s *Store) Recent(ctx context.Context, n int) ([]Entry, error) {
 	return scanRows(rows, scanList), nil
 }
 
-// Pinned returns up to n pinned entries, most recently used first.
+// Pinned returns up to n pinned entries in pin order.
 func (s *Store) Pinned(ctx context.Context, n int) ([]Entry, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+listCols+` FROM entries WHERE pinned=1 ORDER BY used_at DESC LIMIT ?`, n)
+	rows, err := s.db.Query(ctx, `SELECT `+listCols+` FROM entries WHERE pinned=1 ORDER BY `+orderBy+` LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}
 	return scanRows(rows, scanList), nil
 }
+
+// orderBy lists pinned entries first in their own order, then by last use.
+const orderBy = `pinned DESC, CASE WHEN pinned=1 THEN pin_order ELSE 0 END, used_at DESC`
 
 // Counts returns the number of entries, pinned entries and snippets.
 func (s *Store) Counts(ctx context.Context) (entries, pinned, snippets int, err error) {

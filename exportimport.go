@@ -32,7 +32,7 @@ func (a *app) exportTo(ctx context.Context, path string) (size int, err error) {
 }
 
 // importFrom merges an export file into the store and applies retention.
-func (a *app) importFrom(ctx context.Context, path string, maxEntries int, retention time.Duration) (entries, snippets, dupes int, pruned int64, err error) {
+func (a *app) importFrom(ctx context.Context, path string, l history.Limits) (entries, snippets, dupes int, pruned int64, err error) {
 	fh, err := os.Open(path)
 	if err != nil {
 		return 0, 0, 0, 0, err
@@ -53,7 +53,12 @@ func (a *app) importFrom(ctx context.Context, path string, maxEntries int, reten
 	if err != nil {
 		return
 	}
-	pruned, err = a.store.Prune(ctx, maxEntries, retention, time.Now())
+	pruned, err = a.store.Prune(ctx, l, time.Now())
+	if err == nil && pruned > 0 {
+		if cerr := a.store.Compact(ctx); cerr != nil {
+			slog.Error("compact", "err", cerr)
+		}
+	}
 	return
 }
 
@@ -68,7 +73,7 @@ func (a *app) postSettings(fn func()) {
 func (a *app) exportData() {
 	parent := a.settingsWin
 	a.async(func() {
-		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{
+		path, err := a.saveDialog(mygo.SaveDialogOptions{
 			Parent:      parent,
 			Title:       "Export clipboard history",
 			DefaultPath: history.ExportFormat + "-" + time.Now().Format("2006-01-02") + ".json",
@@ -91,7 +96,7 @@ func (a *app) exportData() {
 func (a *app) importData() {
 	// Main-thread state is read here: the closure runs off the main thread.
 	parent := a.settingsWin
-	maxEntries, retention := a.cfg.MaxEntries, time.Duration(a.cfg.RetentionDays)*24*time.Hour
+	limits := a.cfg.Limits()
 	a.async(func() {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent:  parent,
@@ -101,7 +106,7 @@ func (a *app) importData() {
 		if err != nil || len(paths) == 0 {
 			return
 		}
-		e, s, d, pruned, err := a.importFrom(a.ctx, paths[0], maxEntries, retention)
+		e, s, d, pruned, err := a.importFrom(a.ctx, paths[0], limits)
 		if err != nil {
 			mygo.Dialog.Error("Import failed", err.Error())
 			return
@@ -113,6 +118,7 @@ func (a *app) importData() {
 			}
 			a.settingsUI.toast = msg
 			a.changed()
+			a.registerSnippetShortcuts()
 		})
 	})
 }

@@ -8,8 +8,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"okibaclip/internal/fsutil"
+	"okibaclip/internal/history"
 )
 
 // Settings are the user's preferences, stored as settings.json.
@@ -20,10 +22,13 @@ type Settings struct {
 	CaptureImages   bool     `json:"captureImages"`
 	CaptureFiles    bool     `json:"captureFiles"`
 	MaxImageMB      int      `json:"maxImageMB"`
+	MaxStorageMB    int      `json:"maxStorageMB"`
 	SkipSensitive   bool     `json:"skipSensitive"`
 	IgnorePatterns  []string `json:"ignorePatterns"`
+	IgnoreApps      []string `json:"ignoreApps"`
 	PollMillis      int      `json:"pollMillis"`
 	MoveToTopOnCopy bool     `json:"moveToTopOnCopy"`
+	PasteAfterCopy  bool     `json:"pasteAfterCopy"`
 	FirstRunDone    bool     `json:"firstRunDone"`
 }
 
@@ -46,6 +51,7 @@ func Default() Settings {
 		CaptureImages:   true,
 		CaptureFiles:    true,
 		MaxImageMB:      10,
+		MaxStorageMB:    1024,
 		SkipSensitive:   true,
 		PollMillis:      500,
 		MoveToTopOnCopy: true,
@@ -77,6 +83,7 @@ func (s *Settings) Normalize() {
 	s.MaxEntries = min(max(s.MaxEntries, 50), 5000)
 	s.RetentionDays = min(max(s.RetentionDays, 0), 3650)
 	s.MaxImageMB = min(max(s.MaxImageMB, 1), 50)
+	s.MaxStorageMB = min(max(s.MaxStorageMB, 100), 20480)
 	if !slices.Contains(PollIntervals, s.PollMillis) {
 		s.PollMillis = 500
 	}
@@ -87,6 +94,20 @@ func (s *Settings) Normalize() {
 		}
 	}
 	s.IgnorePatterns = keep
+
+	var apps []string
+	for _, a := range s.IgnoreApps {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a != "" && !slices.Contains(apps, a) {
+			apps = append(apps, a)
+		}
+	}
+	s.IgnoreApps = apps
+}
+
+// Limits are the history retention rules s sets.
+func (s Settings) Limits() history.Limits {
+	return history.Limits{MaxEntries: s.MaxEntries, Retention: time.Duration(s.RetentionDays) * 24 * time.Hour, MaxBytes: int64(s.MaxStorageMB) << 20}
 }
 
 // Save writes s to path atomically, with mode 0600.

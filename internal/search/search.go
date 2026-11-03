@@ -57,11 +57,14 @@ type Query struct {
 	// After and Before bound the time of last use: at or after After, and
 	// before Before. Zero leaves that side open.
 	After, Before time.Time
+	// Apps are source-app names (lower-cased) the entry must have come from,
+	// any of them, matched as substrings.
+	Apps []string
 }
 
 // HasFilters reports whether the query has any filter besides its words.
 func (q Query) HasFilters() bool {
-	return len(q.Kinds) > 0 || q.Pinned != nil || !q.After.IsZero() || !q.Before.IsZero()
+	return len(q.Kinds) > 0 || len(q.Apps) > 0 || q.Pinned != nil || !q.After.IsZero() || !q.Before.IsZero()
 }
 
 // IsZero reports whether the query selects everything.
@@ -123,6 +126,11 @@ func (q *Query) filter(word string, now time.Time) bool {
 			}
 			return true
 		}
+	case "app", "from":
+		if !slices.Contains(q.Apps, val) {
+			q.Apps = append(q.Apps, val)
+		}
+		return true
 	case "after", "since":
 		if t, ok := parseWhen(val, now); ok {
 			if t.After(q.After) {

@@ -38,6 +38,9 @@ func (a *app) setupTray() {
 }
 
 func trayLabel(e history.Entry) string {
+	if e.Title != "" {
+		return truncRunes(e.Title, 40)
+	}
 	if e.Kind == history.KindImage {
 		return fmt.Sprintf("Image %d×%d", e.Width, e.Height)
 	}
@@ -71,7 +74,11 @@ func (a *app) buildTrayMenu() *mygo.Menu {
 	}
 	var snips []*mygo.MenuItem
 	for _, s := range a.traySnippets {
-		snips = append(snips, &mygo.MenuItem{Label: truncRunes(s.Name, 40), Click: func(*mygo.MenuItem, *mygo.Window) { a.copySnippet(s) }})
+		it := &mygo.MenuItem{Label: truncRunes(s.Name, 40), Click: func(*mygo.MenuItem, *mygo.Window) { a.copySnippet(s) }}
+		if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+			it.Accelerator = s.Shortcut
+		}
+		snips = append(snips, it)
 	}
 	if len(snips) == 0 {
 		snips = []*mygo.MenuItem{{Label: "None", Disabled: true}}

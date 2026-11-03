@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 
+	"okibaclip/internal/fsutil"
 	"okibaclip/internal/history"
+	"okibaclip/internal/placeholder"
 	"okibaclip/internal/transform"
 )
 
@@ -43,6 +47,7 @@ type copyResult struct {
 	ok    bool   // the panel may hide
 	toast string // message to show, if any
 	err   error
+	left  int // runes to move the caret back after pasting
 }
 
 // textHash is the history hash of text as the monitor would capture it.
@@ -131,6 +136,19 @@ func (a *app) finishCopy(r copyResult) {
 	if r.ok {
 		a.hint = "Copied — press " + pasteKey() + " to paste"
 		a.hide()
+		if a.cfg.PasteAfterCopy && a.pasteOK {
+			if a.paster.Trusted(false) {
+				a.hint = ""
+				p, left := a.paster, r.left
+				a.async(func() {
+					if err := p.Paste(left); err != nil {
+						slog.Warn("paste", "err", err)
+					}
+				})
+			} else {
+				a.hint = "Copied — allow " + appName + " in Accessibility settings to paste automatically"
+			}
+		}
 	}
 }
 
@@ -233,9 +251,94 @@ func (a *app) copyTransformed(e history.Entry, t transform.Transform) {
 	})
 }
 
+// copySnippet writes a snippet with its placeholders expanded.
 func (a *app) copySnippet(s history.Snippet) {
-	err := a.write(textHash(s.Body), textData(s.Body, ""))
-	a.finishCopy(copyResult{ok: err == nil, err: err})
+	clip := func() string {
+		b, err := a.src.ReadFormat(transfer.Text)
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	text, left := placeholder.Expand(s.Body, time.Now(), clip)
+	err := a.write(textHash(text), textData(text, ""))
+	if err == nil {
+		a.async(func() {
+			if err := a.store.UseSnippet(a.ctx, s.ID, time.Now()); err != nil {
+				slog.Error("use snippet", "err", err)
+			}
+			a.post(a.changed)
+		})
+	}
+	a.finishCopy(copyResult{ok: err == nil, err: err, left: left})
+}
+
+// saveImage asks where to save an image entry, then writes its PNG there.
+func (a *app) saveImage(e history.Entry) {
+	parent := a.panel
+	a.async(func() {
+		path, err := a.saveDialog(mygo.SaveDialogOptions{
+			Parent:      parent,
+			Title:       "Save Image",
+			DefaultPath: "Image " + e.CreatedAt.Format("2006-01-02 15.04.05") + ".png",
+			Filters:     []mygo.FileFilter{{Name: "PNG", Extensions: []string{"png"}}},
+		})
+		if err != nil || path == "" {
+			return
+		}
+		full, err := a.store.Get(a.ctx, e.ID)
+		if err == nil {
+			err = fsutil.WriteFileAtomic(path, full.Image)
+		}
+		msg := "Saved to " + path
+		if err != nil {
+			slog.Error("save image", "err", err)
+			msg = "Save failed: " + err.Error()
+		}
+		a.post(func() { a.toast = msg })
+	})
+}
+
+// imageFileDir holds the PNG files that Copy as File puts on the clipboard.
+func (a *app) imageFileDir() string { return filepath.Join(a.dataDir, "files") }
+
+// copyImageFile copies an image entry as a PNG file, for apps that take
+// files and not images.
+func (a *app) copyImageFile(e history.Entry) {
+	a.async(func() {
+		full, err := a.store.Get(a.ctx, e.ID)
+		var p string
+		if err == nil {
+			dir := a.imageFileDir()
+			p = filepath.Join(dir, "Image-"+full.Hash[:12]+".png")
+			if err = os.MkdirAll(dir, 0o700); err == nil {
+				if _, serr := os.Stat(p); serr != nil {
+					err = fsutil.WriteFileAtomic(p, full.Image)
+				}
+			}
+		}
+		if err == nil {
+			var d transfer.Data
+			if d, err = transfer.FileData(p); err == nil {
+				err = a.write(filesHash([]string{p}), d)
+			}
+		}
+		a.post(func() { a.finishCopy(copyResult{ok: err == nil, err: err}) })
+	})
+}
+
+// cleanImageFiles removes copied-as-file images older than a day.
+func (a *app) cleanImageFiles() {
+	dir := a.imageFileDir()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, de := range ents {
+		if info, err := de.Info(); err == nil && !info.IsDir() && time.Since(info.ModTime()) > 24*time.Hour {
+			os.Remove(filepath.Join(dir, de.Name()))
+		}
+	}
 }
 
 func pasteKey() string {

@@ -187,14 +187,14 @@ func TestPruneKeepsPinnedAndRespectsMaxAndRetention(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: string(rune('a' + i))}, now.Add(-time.Duration(5-i)*time.Hour))
 	}
-	if _, err := s.Prune(ctx, 1000, 30*24*time.Hour, now); err != nil {
+	if _, err := s.Prune(ctx, history.Limits{MaxEntries: 1000, Retention: 30 * 24 * time.Hour}, now); err != nil {
 		t.Fatal(err)
 	}
 	l, _ := s.List(ctx, history.Filter{Tab: "all"})
 	if len(l) != 6 {
 		t.Fatalf("retention left %v", historytest.Texts(l))
 	}
-	if _, err := s.Prune(ctx, 2, 0, now); err != nil {
+	if _, err := s.Prune(ctx, history.Limits{MaxEntries: 2}, now); err != nil {
 		t.Fatal(err)
 	}
 	l, _ = s.List(ctx, history.Filter{Tab: "all"})
@@ -313,7 +313,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 }
 
 func TestDecodeExportRejects(t *testing.T) {
-	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"okibaclip-export","version":2}`} {
+	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"okibaclip-export","version":3}`} {
 		if _, err := history.DecodeExport([]byte(in)); err == nil {
 			t.Errorf("accepted %s", in)
 		}

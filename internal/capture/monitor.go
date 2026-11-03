@@ -188,10 +188,13 @@ func (m *Monitor) pruneLoop(ctx context.Context) {
 
 func (m *Monitor) prune(ctx context.Context) {
 	c := m.cfg()
-	n, err := m.store.Prune(ctx, c.MaxEntries, time.Duration(c.RetentionDays)*24*time.Hour, m.now())
+	n, err := m.store.Prune(ctx, c.Settings.Limits(), m.now())
 	if err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
 	} else if n > 0 {
+		if err := m.store.Compact(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("compact", "err", err)
+		}
 		m.onChange()
 	}
 }
@@ -281,6 +284,13 @@ func (m *Monitor) tick(ctx context.Context) {
 		update()
 		return
 	}
+	owner := m.src.Owner()
+	if ignoredApp(owner, cfg.IgnoreApps) {
+		slog.Info("capture skipped", "reason", "ignored app", "app", owner.App)
+		m.takeIgnore()
+		update()
+		return
+	}
 	if cfg.SkipSensitive && IsSensitive(m.src.NativeFormats(), formats, m.src.ReadFormat) {
 		slog.Info("capture skipped", "reason", "sensitive")
 		m.takeIgnore()
@@ -323,6 +333,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		}
 		return
 	}
+	c.SourceApp, c.SourceName, c.SourcePath = owner.App, owner.Name, owner.Path
 	if m.takeSuppressed(c.Hash()) {
 		update()
 		return
@@ -353,7 +364,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	}
 	m.captureFails = 0
 	update()
-	if _, err := m.store.Prune(ctx, cfg.MaxEntries, time.Duration(cfg.RetentionDays)*24*time.Hour, m.now()); err != nil && ctx.Err() == nil {
+	if _, err := m.store.Prune(ctx, cfg.Settings.Limits(), m.now()); err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
 	}
 	m.onChange()

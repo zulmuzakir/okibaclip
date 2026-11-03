@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,7 +17,9 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"okibaclip/internal/capture"
+	"okibaclip/internal/fsutil"
 	"okibaclip/internal/history"
+	"okibaclip/internal/paste"
 	"okibaclip/internal/search"
 	"okibaclip/internal/settings"
 )
@@ -30,7 +34,29 @@ const (
 var tabLabels = []string{"All", "Pinned", "Text", "Links", "Images", "Files", "Snippets"}
 var tabFilters = []string{"all", "pinned", "text", "link", "image", "files"}
 
-const tabSnippets = 6
+const (
+	tabPinned   = 1
+	tabSnippets = 6
+)
+
+// Folder choices of the snippet list besides the folders themselves.
+const (
+	allFolders = "All folders"
+	noFolder   = "No folder"
+)
+
+// hotkeyRegistry is the global-shortcut service.
+type hotkeyRegistry interface {
+	Register(acc string, fn func()) error
+	Unregister(acc string)
+}
+
+// paster sends the paste keystroke to the app the user came from.
+type paster interface {
+	Remember()
+	Trusted(prompt bool) bool
+	Paste(left int) error
+}
 
 // listLimit is the most history rows the panel lists.
 const listLimit = 1000
@@ -87,15 +113,29 @@ type app struct {
 	snipList      ui.ListState
 	chosenSnippet int
 	editor        struct {
-		open       bool
-		id         int64
-		name, body string
-		err        string
-		saving     bool
+		open             bool
+		id               int64
+		name, body       string
+		folder, shortcut string
+		err              string
+		saving           bool
 	}
-	listStale bool   // the query or tab changed and its results haven't landed
-	afterList func() // runs once fresh results land
-	pending   func() // chosen in a context menu, run after the list is built
+	edit struct {
+		open   bool
+		id     int64
+		rename bool
+		value  string
+		err    string
+		saving bool
+	}
+	snipFolders   []string
+	snipFolder    string           // "" = all folders, noFolder, or a folder
+	snipFolderSel string           // the select's label for snipFolder
+	snipKeys      map[string]int64 // registered snippet accelerators -> snippet id
+	appIcons      map[string]*ui.Bitmap
+	listStale     bool   // the query or tab changed and its results haven't landed
+	afterList     func() // runs once fresh results land
+	pending       func() // chosen in a context menu, run after the list is built
 
 	// Tray data, refreshed by refreshData.
 	trayRecent, trayPinned []history.Entry
@@ -107,21 +147,35 @@ type app struct {
 
 	quitting    bool
 	waylandMode string
+	// waylandCapture is set when wl-paste captures copies natively.
+	waylandCapture bool
+	pasteOK        bool
+	pasteNote      string
 
 	// Seams for tests.
 	async          func(func())
 	post           func(func())
 	writeClipboard func(transfer.Data) error
+	hotkeys        hotkeyRegistry
+	paster         paster
+	fileIcon       func(path string, size int) ([]byte, error)
+	saveDialog     func(mygo.SaveDialogOptions) (string, error)
 
 	settingsUI settingsState
 }
 
 func newApp() *app {
 	a := &app{
-		ctx:    context.Background(),
-		thumbs: map[int64]*ui.Bitmap{},
-		src:    capture.SystemClipboard{},
-		cfg:    settings.Default(),
+		ctx:        context.Background(),
+		thumbs:     map[int64]*ui.Bitmap{},
+		appIcons:   map[string]*ui.Bitmap{},
+		snipKeys:   map[string]int64{},
+		src:        capture.SystemClipboard{},
+		hotkeys:    mygo.GlobalShortcut,
+		paster:     paste.System{},
+		fileIcon:   mygo.Shell.FileIcon,
+		saveDialog: mygo.Dialog.Save,
+		cfg:        settings.Default(),
 	}
 	a.async = func(fn func()) { go fn() }
 	a.post = func(fn func()) {
@@ -143,7 +197,11 @@ func (a *app) ready() {
 		return
 	}
 	a.dataDir = dir
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err == nil {
+		if err := fsutil.Restrict(dir); err != nil {
+			slog.Warn("restrict data folder", "err", err)
+		}
+	} else {
 		mygo.Dialog.Error(appName, "Cannot create "+dir+": "+err.Error())
 		mygo.App.Quit()
 		return
@@ -188,6 +246,15 @@ func (a *app) ready() {
 	a.registerShortcut()
 	a.setupTray()
 
+	if a.waylandMode == "wayland" || a.waylandMode == "xwayland" {
+		if src, err := capture.NewWaylandSource(ctx); err == nil {
+			a.src, a.waylandCapture = src, true
+		} else {
+			slog.Info("wl-paste capture unavailable", "err", err)
+		}
+	}
+	a.pasteOK, a.pasteNote = paste.Available(a.waylandMode)
+	a.async(a.cleanImageFiles)
 	m := capture.New(a.src, a.store, a.cfg, func() { a.post(a.changed) })
 	a.mon = m
 	go m.Run(ctx)
@@ -203,6 +270,7 @@ func (a *app) ready() {
 		}
 	}
 	a.refreshData()
+	a.registerSnippetShortcuts()
 
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
 		a.cancel()
@@ -224,6 +292,7 @@ func (a *app) show(o origin) {
 	a.selected.Clear()
 	a.toast, a.toastUndo = "", nil
 	a.footerNote, a.hint = a.hint, ""
+	a.paster.Remember()
 	a.syntaxOpen = false
 	a.requery()
 	a.search.Focus()
@@ -275,14 +344,19 @@ func (a *app) toggle(o origin) {
 // reload runs the list query asynchronously and applies the newest result.
 func (a *app) reload() {
 	a.gen++
-	gen, tab := a.gen, a.tab
+	gen, tab, folder := a.gen, a.tab, a.snipFolder
 	q := search.Parse(a.query, time.Now())
 	a.async(func() {
 		var items []history.Entry
 		var snips []history.Snippet
+		var folders []string
 		var err error
 		if tab == tabSnippets {
 			snips, err = a.store.Snippets(a.ctx, q.Terms)
+			if err == nil {
+				folders, err = a.store.SnippetFolders(a.ctx)
+			}
+			snips = inFolder(snips, folder)
 		} else {
 			items, err = a.store.List(a.ctx, history.Filter{Tab: tabFilters[tab], Query: q, Limit: listLimit})
 		}
@@ -302,6 +376,13 @@ func (a *app) reload() {
 				return
 			}
 			a.items, a.snippets, a.shown = items, snips, q
+			if tab == tabSnippets {
+				a.snipFolders = folders
+				if a.snipFolder != "" && a.snipFolder != noFolder && !slices.Contains(folders, a.snipFolder) {
+					a.snipFolder, a.snipFolderSel = "", allFolders
+					a.requery()
+				}
+			}
 			keep := map[int64]*ui.Bitmap{}
 			for _, e := range items {
 				if b, ok := a.thumbs[e.ID]; ok {
@@ -340,6 +421,7 @@ func (a *app) changed() {
 func (a *app) refreshData() {
 	a.trayGen++
 	gen := a.trayGen
+	have, fileIcon := maps.Clone(a.appIcons), a.fileIcon // read here: the closure runs off the main thread
 	a.async(func() {
 		recent, err1 := a.store.Recent(a.ctx, 10)
 		pinned, err2 := a.store.Pinned(a.ctx, 20)
@@ -354,11 +436,13 @@ func (a *app) refreshData() {
 		if len(snips) > 30 {
 			snips = snips[:30]
 		}
+		icons := a.loadAppIcons(have, fileIcon)
 		a.post(func() {
 			if gen != a.trayGen {
 				return
 			}
 			a.trayRecent, a.trayPinned, a.traySnippets = recent, pinned, snips
+			a.appIcons = icons
 			a.counts.entries, a.counts.pinned, a.counts.snippets = e, p, s
 			a.refreshTray()
 		})
@@ -372,6 +456,57 @@ func firstErr(errs ...error) error {
 		}
 	}
 	return nil
+}
+
+// loadAppIcons looks up icons new source apps need, then returns every
+// stored icon as a bitmap, reusing those in have. It runs off the main
+// thread; DecodeBitmap only builds pixels (mygo ui/bitmap.go).
+func (a *app) loadAppIcons(have map[string]*ui.Bitmap, fileIcon func(string, int) ([]byte, error)) map[string]*ui.Bitmap {
+	missing, err := a.store.AppIconsMissing(a.ctx)
+	if err != nil {
+		slog.Warn("app icons", "err", err)
+	}
+	for _, m := range missing {
+		png, err := fileIcon(m.Path, 32)
+		if err != nil {
+			png = nil
+		}
+		if err := a.store.SetAppIcon(a.ctx, m.App, png); err != nil {
+			slog.Warn("app icon", "err", err)
+		}
+	}
+	icons, err := a.store.AppIcons(a.ctx)
+	if err != nil {
+		slog.Warn("app icons", "err", err)
+	}
+	out := make(map[string]*ui.Bitmap, len(icons))
+	for _, ic := range icons {
+		if b, ok := have[ic.App]; ok {
+			out[ic.App] = b
+		} else if b, err := ui.DecodeBitmap(ic.Icon); err == nil {
+			out[ic.App] = b
+		}
+	}
+	return out
+}
+
+// inFolder keeps the snippets in the chosen folder: all for "", the ones
+// without a folder for noFolder.
+func inFolder(snips []history.Snippet, choice string) []history.Snippet {
+	if choice == "" {
+		return snips
+	}
+	want := choice
+	if choice == noFolder {
+		want = ""
+	}
+	out := snips[:0:0]
+	for _, s := range snips {
+		if s.Folder == want {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // loadPreview fetches the full chosen entry for the preview pane.
@@ -469,7 +604,7 @@ func (a *app) registerShortcut() {
 	}
 	a.shortcut, a.shortcutErr = "", ""
 	for _, s := range cands {
-		if err := mygo.GlobalShortcut.Register(s, a.onHotkey); err != nil {
+		if err := a.hotkeys.Register(s, a.onHotkey); err != nil {
 			slog.Warn("shortcut unavailable", "accelerator", s, "err", err)
 			a.shortcutErr = err.Error()
 			continue
@@ -484,13 +619,13 @@ func (a *app) applyShortcut(acc string) error {
 	acc = strings.TrimSpace(acc)
 	old := a.shortcut
 	if old != "" {
-		mygo.GlobalShortcut.Unregister(old)
+		a.hotkeys.Unregister(old)
 	}
 	restore := func() {
 		if old == "" {
 			return
 		}
-		if err := mygo.GlobalShortcut.Register(old, a.onHotkey); err != nil {
+		if err := a.hotkeys.Register(old, a.onHotkey); err != nil {
 			slog.Warn("shortcut restore failed", "accelerator", old, "err", err)
 			a.shortcut, a.shortcutErr = "", err.Error()
 			return
@@ -509,7 +644,7 @@ func (a *app) applyShortcut(acc string) error {
 		}
 		return nil
 	}
-	if err := mygo.GlobalShortcut.Register(acc, a.onHotkey); err != nil {
+	if err := a.hotkeys.Register(acc, a.onHotkey); err != nil {
 		restore()
 		return err
 	}
@@ -588,6 +723,9 @@ func (a *app) confirmClear(parent *mygo.Window) {
 		if _, err := a.store.Clear(a.ctx, true); err != nil {
 			slog.Error("clear", "err", err)
 			return
+		}
+		if err := a.store.Compact(a.ctx); err != nil {
+			slog.Error("compact", "err", err)
 		}
 		a.post(a.changed)
 	})

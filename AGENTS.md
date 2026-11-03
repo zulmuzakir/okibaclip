@@ -5,9 +5,9 @@
 Okiba Clip (slug `okibaclip`) is a clipboard history manager for macOS 12+, Windows 10/11 and Linux (GTK 3), built on [mygo](https://github.com/egoist/mygo) (pinned at v0.7.4) with its native immediate-mode `ui` package. It runs in the tray or menu bar with no Dock icon. It records text, rich text, links, colors, images and files, and opens a searchable panel from a global shortcut (default `Alt+Shift+V`). The panel also has snippets, text transforms and export/import.
 
 Product constraints to keep:
-- No keystroke injection and no Accessibility permission. Choosing an entry copies it and hides the panel; the user pastes.
+- Keystroke injection only when the user turns on Paste after choosing (off by default; macOS asks for Accessibility then). Otherwise choosing an entry copies it and hides the panel and the user pastes.
 - Copies that password managers mark as concealed or transient are skipped (`internal/capture/classify.go`).
-- Every data file is mode 0600: the history DB, `settings.json` and exports.
+- Every data file is owner-only (`fsutil.Restrict`: mode 0600, or an owner+SYSTEM ACL on Windows): the history DB, `settings.json`, exports and saved images.
 
 ## Architecture & Data Flow
 
@@ -38,7 +38,7 @@ flowchart LR
   - When `MoveToTopOnCopy` is on, `copyEntry` doesn't suppress on purpose; it `Touch`es the entry after a successful write instead.
 - **CLI (`app.command`):** a second launch forwards `--toggle|--show|--hide|--settings|--pause|--resume|--quit` to the running instance. A bare launch shows the panel.
 - **Export/import (`exportimport.go`, `internal/history/export.go`):**
-  - Writes format `okibaclip-export`, version 1.
+  - Writes format `okibaclip-export`, version 2; version 1 files still import.
   - Imports are capped at 512 MiB (`MaxImportSize`).
 
 ## Key Directories
@@ -109,7 +109,9 @@ Format with `gofmt`. There is no other linter.
 - `panel.go`, `panel_snippets.go`: panel UI (search, tabs, list, preview, context menu, snippet editor).
 - `copy.go`: clipboard write-back and suppression.
 - `internal/capture/monitor.go`, `classify.go`: the capture pipeline.
-- `internal/history/store.go`: schema, `Capture` upsert, `Prune`, search.
+- `internal/history/store.go`: versioned migrations (`migrations`, schema v2), `Capture` upsert, `Prune` (count, age and storage budget) and `Compact`, search.
+- `internal/capture/owner_*.go`: source-app lookup per OS; `wayland_linux.go`: `wl-paste` capture on data-control compositors.
+- `internal/paste/`: opt-in paste keystroke; `internal/placeholder/`: snippet placeholders.
 - `go.mod`: Go 1.27.3; `tool github.com/egoist/mygo/cmd/mygo` (this is what enables `go tool mygo`).
 - `mygo.json`: name, identifier, version (bump it to match release tags; tags don't set artifact versions), `LSUIElement`, Linux deb deps (`libayatana-appindicator3-1`, `webview: false`).
 - `.github/workflows/ci.yml`, `release.yml`: CI and tag-driven (`v*`) draft releases.

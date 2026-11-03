@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"okibaclip/internal/history"
 	"okibaclip/internal/settings"
 )
 
@@ -19,6 +20,9 @@ type settingsState struct {
 	maxEntries float64
 	retention  float64
 	imageMB    float64
+	storageMB  float64
+	ignoreApps string
+	recentApps []history.SourceApp
 	poll       string
 	patterns   string
 	patErr     string
@@ -50,6 +54,8 @@ func (a *app) syncSettingsUI() {
 	s := &a.settingsUI
 	s.form = a.cfg
 	s.maxEntries, s.retention, s.imageMB = float64(a.cfg.MaxEntries), float64(a.cfg.RetentionDays), float64(a.cfg.MaxImageMB)
+	s.storageMB = float64(a.cfg.MaxStorageMB)
+	s.ignoreApps = strings.Join(a.cfg.IgnoreApps, "\n")
 	s.poll = pollLabel(a.cfg.PollMillis)
 	s.patterns = strings.Join(a.cfg.IgnorePatterns, "\n")
 	s.patErr = ""
@@ -118,12 +124,22 @@ func (a *app) refreshStats() {
 		if err != nil {
 			return
 		}
+		u, err := a.store.Usage(a.ctx)
+		if err != nil {
+			return
+		}
+		apps, err := a.store.SourceApps(a.ctx, 8)
+		if err != nil {
+			return
+		}
 		size := humanSize(fileSize(filepath.Join(a.dataDir, "history.db")))
+		limit := humanSize(int64(a.cfg.MaxStorageMB) << 20)
 		a.postSettings(func() {
 			if gen != a.statsGen {
 				return
 			}
-			a.settingsUI.stats = fmt.Sprintf("%d entries · %d pinned · %d snippets · database %s", e, p, s, size)
+			a.settingsUI.recentApps = apps
+			a.settingsUI.stats = fmt.Sprintf("%d entries · %d pinned · %d snippets · %s of %s used (images %s) · file %s", e, p, s, humanSize(u.Bytes), limit, humanSize(u.ImageBytes), size)
 		})
 	})
 }
@@ -133,6 +149,8 @@ func (a *app) applySettings() {
 	s := &a.settingsUI
 	f := s.form
 	f.MaxEntries, f.RetentionDays, f.MaxImageMB = int(s.maxEntries), int(s.retention), int(s.imageMB)
+	f.MaxStorageMB = int(s.storageMB)
+	f.IgnoreApps = strings.Split(s.ignoreApps, "\n")
 	for _, ms := range settings.PollIntervals {
 		if pollLabel(ms) == s.poll {
 			f.PollMillis = ms
@@ -151,6 +169,7 @@ func (a *app) applySettings() {
 	f.Normalize()
 	s.form = f
 	s.maxEntries, s.retention, s.imageMB = float64(f.MaxEntries), float64(f.RetentionDays), float64(f.MaxImageMB)
+	s.storageMB = float64(f.MaxStorageMB)
 	a.cfg = f
 	if a.cfgPath != "" {
 		if err := settings.Save(a.cfgPath, f); err != nil {
@@ -251,6 +270,28 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 				ui.Text(c, "No shortcut registered: "+a.shortcutErr).FontSize(11).TextColor(t.Danger).Wrap()
 			}
 		})
+		ui.Field(c, "Paste after choosing", func() {
+			sw := ui.Switch(c, &s.form.PasteAfterCopy).Label("Paste after choosing").Disabled(!a.pasteOK)
+			if sw.Changed() {
+				if s.form.PasteAfterCopy && isDarwin {
+					a.paster.Trusted(true)
+				}
+				a.applySettings()
+			}
+			msg := "Sends " + pasteKey() + " to the app you were in after you choose an entry."
+			if a.pasteNote != "" {
+				msg += " " + a.pasteNote
+			}
+			help(c, t, msg)
+			if isDarwin && s.form.PasteAfterCopy && !a.paster.Trusted(false) {
+				ui.Text(c, "Allow "+appName+" in System Settings › Privacy & Security › Accessibility").FontSize(11).TextColor(t.Danger).Wrap()
+				if ui.Button(c, "Open Accessibility Settings").Clicked() {
+					if err := mygo.Shell.OpenExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"); err != nil {
+						s.toast = err.Error()
+					}
+				}
+			}
+		})
 		if isLinux {
 			ui.Field(c, "Desktop shortcut", func() {
 				help(c, t, "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs:")
@@ -296,6 +337,12 @@ func (a *app) historySection(c *ui.Context, t *ui.Theme) {
 				a.applySettings()
 			}
 		})
+		ui.Field(c, "Storage limit (MB)", func() {
+			if ui.NumberInput(c, &s.storageMB, 100, 20480, 100).Label("Storage limit (MB)").Changed() {
+				a.applySettings()
+			}
+			help(c, t, "Oldest unpinned entries are removed when history passes this size. Pinned entries count toward it but are never removed.")
+		})
 		sw("Skip passwords & concealed copies", &s.form.SkipSensitive)
 		sw("Move copied entry to top", &s.form.MoveToTopOnCopy)
 		ui.Field(c, "Check clipboard every", func() {
@@ -310,6 +357,25 @@ func (a *app) historySection(c *ui.Context, t *ui.Theme) {
 			help(c, t, "One regular expression per line. Text matching one entirely is not recorded.")
 			if s.patErr != "" {
 				ui.Text(c, s.patErr).FontSize(11).TextColor(t.Danger).Wrap()
+			}
+		})
+		ui.Field(c, "Ignore apps", func() {
+			if ui.TextArea(c, &s.ignoreApps).Label("Ignore apps").Height(80).Changed() {
+				a.applySettings()
+			}
+			help(c, t, "One per line: bundle ID or app name on macOS (com.agilebits.onepassword7), executable on Windows (keepass.exe), window class on Linux X11. Copies from these apps are not recorded.")
+			if len(s.recentApps) > 0 {
+				ui.Row(c).Gap(6).Children(func() {
+					for _, app := range s.recentApps {
+						name := app.Name
+						if name == "" {
+							name = app.App
+						}
+						if ui.Button(c, name).Clicked() {
+							a.ignoreApp(app.App)
+						}
+					}
+				})
 			}
 		})
 	})
@@ -351,7 +417,10 @@ func (a *app) aboutSection(c *ui.Context, t *ui.Theme) {
 	if isDarwin {
 		help(c, t, "If macOS asks, choose Always Allow for "+appName+" (System Settings › Privacy & Security › Paste from Other Apps)")
 	}
-	if a.waylandMode == "wayland" {
+	if a.waylandCapture {
+		help(c, t, "Clipboard: wl-paste (Wayland data-control)")
+	}
+	if a.waylandMode == "wayland" && !a.waylandCapture {
 		help(c, t, "Native Wayland: copies are recorded only while an "+appName+" window is focused.")
 	}
 }
@@ -363,4 +432,19 @@ func patternErrText(err error) string {
 		return fmt.Sprintf("Line %d: %v", pe.Line, pe.Err)
 	}
 	return err.Error()
+}
+
+// ignoreApp adds app to the ignore list unless it is listed.
+func (a *app) ignoreApp(app string) {
+	s := &a.settingsUI
+	for _, l := range strings.Split(s.ignoreApps, "\n") {
+		if strings.EqualFold(strings.TrimSpace(l), app) {
+			return
+		}
+	}
+	if strings.TrimSpace(s.ignoreApps) != "" && !strings.HasSuffix(s.ignoreApps, "\n") {
+		s.ignoreApps += "\n"
+	}
+	s.ignoreApps += app
+	a.applySettings()
 }

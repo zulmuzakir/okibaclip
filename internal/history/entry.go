@@ -42,6 +42,9 @@ type Entry struct {
 	Pinned            bool
 	CreatedAt, UsedAt time.Time
 	UseCount          int
+	// Title names a pinned entry; PinOrder sorts pinned entries ascending.
+	Title, SourceApp, SourceName string
+	PinOrder                     int64
 }
 
 // Capture is a classified clipboard read, before it is stored.
@@ -50,6 +53,9 @@ type Capture struct {
 	Text, HTML    string
 	Image         []byte
 	Width, Height int
+	// SourceApp, SourceName and SourcePath identify the app the copy came
+	// from; they don't feed Hash.
+	SourceApp, SourceName, SourcePath string
 }
 
 var (

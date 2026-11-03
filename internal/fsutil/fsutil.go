@@ -23,6 +23,9 @@ func WriteFileAtomic(path string, data []byte) error {
 		err = e
 	}
 	if err == nil {
+		err = Restrict(tmp)
+	}
+	if err == nil {
 		err = os.Rename(tmp, path)
 	}
 	if err != nil {

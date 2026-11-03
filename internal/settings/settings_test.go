@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -79,5 +80,37 @@ func TestCompilePatternsNamesBadLine(t *testing.T) {
 	var pe *PatternError
 	if !errors.As(err, &pe) || pe.Line != 3 {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestNormalizeIgnoreAppsAndStorage(t *testing.T) {
+	s := Default()
+	s.IgnoreApps = []string{" KeePass.exe ", "", "keepass.exe", "Com.Agilebits.OnePassword7"}
+	s.MaxStorageMB = 5
+	s.Normalize()
+	if !reflect.DeepEqual(s.IgnoreApps, []string{"keepass.exe", "com.agilebits.onepassword7"}) {
+		t.Errorf("IgnoreApps = %q", s.IgnoreApps)
+	}
+	if s.MaxStorageMB != 100 {
+		t.Errorf("MaxStorageMB = %d", s.MaxStorageMB)
+	}
+	s.MaxStorageMB = 1 << 20
+	s.Normalize()
+	if s.MaxStorageMB != 20480 {
+		t.Errorf("MaxStorageMB = %d", s.MaxStorageMB)
+	}
+}
+
+func TestLoadWithoutStorageKeepsDefault(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(p, []byte(`{"maxEntries": 100}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(p)
+	if err != nil || s.MaxStorageMB != 1024 || s.MaxEntries != 100 {
+		t.Errorf("got %+v, %v", s, err)
+	}
+	if l := s.Limits(); l.MaxBytes != 1024<<20 || l.MaxEntries != 100 {
+		t.Errorf("limits = %+v", l)
 	}
 }

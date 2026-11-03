@@ -103,3 +103,13 @@ func TestHighlight(t *testing.T) {
 }
 
 func spaces(n int) string { return strings.Repeat(" ", n) }
+
+func TestParseAppFilter(t *testing.T) {
+	q := Parse("app:Slack foo from:slack from:Safari", now)
+	if !reflect.DeepEqual(q.Apps, []string{"slack", "safari"}) || len(q.Terms) != 1 || q.Terms[0].Text != "foo" {
+		t.Errorf("got %+v", q)
+	}
+	if !q.HasFilters() {
+		t.Error("app: should count as a filter")
+	}
+}

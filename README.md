@@ -4,7 +4,7 @@
 
 A clipboard history manager for macOS 12+, Windows 10/11 and Linux (GTK 3), built with [mygo](https://github.com/egoist/mygo). It lives in the tray or menu bar, records text, rich text, links, colors, images and files, and opens a searchable panel from a global shortcut (default `Alt+Shift+V`).
 
-Choosing an entry copies it and hides the panel; press Cmd/Ctrl+V yourself. There is no keystroke injection and no Accessibility permission. History is a plain SQLite file (mode 0600) in the app's user-data folder; copies flagged as concealed or transient by password managers are skipped.
+Choosing an entry copies it and hides the panel; press Cmd/Ctrl+V yourself. Keystrokes are sent only if you turn on Paste after choosing in Settings (off by default; macOS then asks for Accessibility). History is a plain SQLite file (mode 0600) in the app's user-data folder; copies flagged as concealed or transient by password managers are skipped.
 
 The user-data folder holds `history.db` and `settings.json`, and Settings › About shows its path:
 
@@ -45,6 +45,7 @@ go test ./...       # the first run downloads the SQLite library
 
 - Tray icons need `libayatana-appindicator3-1`; without it the app still runs and shows the panel at launch.
 - Under Wayland the app forces XWayland (`GDK_BACKEND=x11`) when `DISPLAY` is set, so clipboard polling works. Set `OKIBACLIP_NATIVE_WAYLAND=1` to opt out; native Wayland only sees copies while an Okiba Clip window is focused.
+- With `wl-clipboard` installed on a compositor that supports data-control (KDE, Sway, Hyprland; not GNOME), copies are captured through `wl-paste` even from native Wayland apps. Source-app tracking (ignore list, `app:`) uses the X11 active window, so it covers only X11 apps.
 - Global shortcuts may not reach the app on Wayland. Bind a desktop shortcut to `okibaclip --toggle` instead.
 
 ## macOS
