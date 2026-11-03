@@ -5,9 +5,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/egoist/mygo/ui"
 
 	"okibaclip/internal/history"
 )
@@ -54,11 +57,19 @@ func rowLines(e history.Entry) (title, detail string) {
 			lines = append(lines, l)
 		}
 	}
+	var base []string
+	if e.UseCount > 1 {
+		base = append(base, fmt.Sprintf("used %d×", e.UseCount))
+	}
+	if e.Size >= 1024 {
+		base = append(base, humanSize(e.Size))
+	}
+	meta := strings.Join(append([]string{"Text"}, base...), " · ")
 	switch len(lines) {
 	case 0:
-		return "", "Text · " + humanSize(e.Size)
+		return "", meta
 	case 1:
-		return truncRunes(lines[0], 120), "Text · " + humanSize(e.Size)
+		return truncRunes(lines[0], 120), meta
 	}
 	detail = truncRunes(lines[1], 120)
 	if n := len(lines) - 2; n > 0 {
@@ -82,18 +93,83 @@ func kindTitle(e history.Entry) string {
 	return strings.ToUpper(k[:1]) + k[1:]
 }
 
-// details describes an entry's size and use for the preview header.
-func details(e history.Entry, now time.Time) string {
-	parts := []string{humanSize(e.Size)}
-	if e.Kind == history.KindImage {
-		parts[0] = fmt.Sprintf("%d×%d", e.Width, e.Height)
-		parts = append(parts, humanSize(e.Size))
+// details describes an entry's size and use for the preview footer. stats
+// is the text's textStats, empty when not known.
+func details(e history.Entry, stats string, now time.Time) string {
+	var parts []string
+	switch e.Kind {
+	case history.KindImage:
+		parts = append(parts, fmt.Sprintf("%d×%d", e.Width, e.Height), humanSize(e.Size))
+	case history.KindText:
+		if stats != "" {
+			parts = append(parts, stats)
+		} else {
+			parts = append(parts, humanSize(e.Size))
+		}
 	}
 	if e.UseCount > 1 {
 		parts = append(parts, fmt.Sprintf("used %d×", e.UseCount))
 	}
 	parts = append(parts, "last used "+ago(now, e.UsedAt), "first copied "+e.CreatedAt.Format("Jan 2, 2006 15:04"))
 	return strings.Join(parts, " · ")
+}
+
+// plural is "1 word" or "N words".
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
+// textStats counts text's characters and words, and its lines past one:
+// "13 characters · 1 word", "5 characters · 3 words · 2 lines".
+func textStats(text string) string {
+	parts := []string{plural(utf8.RuneCountInString(text), "character"), plural(len(strings.Fields(text)), "word")}
+	s := strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	if n := strings.Count(s, "\n") + 1; n > 1 {
+		parts = append(parts, plural(n, "line"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// looksLikeCode reports whether text reads as code or data: one {…} or
+// […] block, or two or more lines of which a third are indented or half
+// end in one of {};()[].
+func looksLikeCode(text string) bool {
+	t := strings.TrimSpace(text)
+	if (strings.HasPrefix(t, "{") && strings.HasSuffix(t, "}")) || (strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]")) {
+		return true
+	}
+	n, indented, ends := 0, 0, 0
+	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		n++
+		if strings.HasPrefix(l, "\t") || strings.HasPrefix(l, "  ") {
+			indented++
+		}
+		if r := strings.TrimRight(l, " \t"); r != "" && strings.ContainsRune("{};()[]", rune(r[len(r)-1])) {
+			ends++
+		}
+	}
+	if n < 2 {
+		return false
+	}
+	return indented*3 >= n || ends*2 >= n
+}
+
+// colorValues spells a "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa" color as
+// upper-case #RRGGBB (#RRGGBBAA when not opaque) and as rgb(r, g, b), or
+// rgba(r, g, b, a) with a to two decimals when not opaque.
+func colorValues(c ui.Color) (hex, rgb string) {
+	hex = fmt.Sprintf("#%02X%02X%02X", c.R, c.G, c.B)
+	if c.A == 255 {
+		return hex, fmt.Sprintf("rgb(%d, %d, %d)", c.R, c.G, c.B)
+	}
+	a := strconv.FormatFloat(float64(c.A)/255, 'f', 2, 64)
+	return hex + fmt.Sprintf("%02X", c.A), fmt.Sprintf("rgba(%d, %d, %d, %s)", c.R, c.G, c.B, a)
 }
 
 // ago is relTime as a phrase: "just now", "5m ago", "on Jan 2".

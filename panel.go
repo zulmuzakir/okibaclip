@@ -85,7 +85,7 @@ func (a *app) setTab(i int) {
 	a.tab = (i%len(tabLabels) + len(tabLabels)) % len(tabLabels)
 	a.chosen, a.chosenSnippet = 0, 0
 	a.selected.Clear()
-	a.preview, a.previewBitmap = history.Entry{}, nil
+	a.preview, a.previewBitmap, a.previewStats, a.previewCode = history.Entry{}, nil, "", false
 	a.reload()
 }
 
@@ -188,10 +188,10 @@ func (a *app) view(c *ui.Context) {
 
 	ui.Column(c).Fill().Children(func() {
 		ui.Row(c).Padding(14, 16).Gap(10).AlignItems(ui.Center).Children(func() {
-			ui.Icon(c, iconSearch).FontSize(18).TextColor(t.TextMuted)
+			ui.Icon(c, iconSearch).FontSize(16).TextColor(t.TextMuted)
 			// The field takes Enter before the panel's shortcuts see it.
-			in := ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(18).
-				Placeholder(`Search: words, "phrase", type:link, is:pinned, after:7d`).Label("Search clipboard").
+			in := ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(16).
+				Placeholder("Search clipboard…").Label("Search clipboard").
 				OnTextKey(func(k ui.TextKey) bool {
 					if k.Key != ui.KeyEnter {
 						return false
@@ -207,14 +207,22 @@ func (a *app) view(c *ui.Context) {
 			if count := a.resultCount(); count != "" {
 				ui.Text(c, count).FontSize(12).TextColor(t.TextMuted)
 			}
+			help := iconButton(c, iconInfo, "Search syntax", "Search syntax", t.TextMuted)
+			if help.Clicked() {
+				a.syntaxOpen = !a.syntaxOpen
+				if !a.syntaxOpen {
+					a.search.Focus()
+				}
+			}
+			if ui.Popover(c, help, &a.syntaxOpen, func() { a.syntaxHelp(c) }).Dismissed() {
+				a.search.Focus()
+			}
 		})
-		if ui.Tabs(c, &a.tab, tabLabels...).Changed() {
-			a.setTab(a.tab)
-		}
+		a.filterBar(c)
 		a.banners(c)
 		ui.Divider(c)
 		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Children(func() {
-			ui.Column(c).Width(300).Children(func() {
+			ui.Column(c).Width(340).Children(func() {
 				if a.tab == tabSnippets {
 					a.snippetList(c)
 				} else {
@@ -231,17 +239,11 @@ func (a *app) view(c *ui.Context) {
 			})
 		})
 		ui.Divider(c)
-		ui.Row(c).Padding(8, 16).Gap(16).Children(func() {
-			note := a.footerNote
-			switch {
-			case note != "":
-			case a.tab != tabSnippets && a.selected.Len() > 1:
-				note = fmt.Sprintf("%d selected — ↵ Copy merged", a.selected.Len())
-			default:
-				cm := cmdSym()
-				note = fmt.Sprintf("%s to show · ↵ Copy · ⇧↵ Plain · %sP Pin · esc Close", keys(a.shortcut), cm)
+		ui.Row(c).Padding(8, 16).Gap(12).AlignItems(ui.Center).Children(func() {
+			ui.RichText(c, a.hintSpans(t)...).FontSize(11).SingleLine().Grow(1)
+			if s := a.footerStatus(); s != "" {
+				ui.Text(c, s).FontSize(11).TextColor(t.TextMuted).SingleLine()
 			}
-			ui.Text(c, note).FontSize(11).TextColor(t.TextMuted).Grow(1)
 		})
 	})
 	a.editorModal(c)
@@ -251,7 +253,7 @@ func (a *app) shortcuts(c *ui.Context) {
 	if a.editor.open {
 		return
 	}
-	if a.query != "" && c.Shortcut(0, ui.KeyEscape) {
+	if a.query != "" && !a.syntaxOpen && c.Shortcut(0, ui.KeyEscape) {
 		a.query = ""
 		a.chosen, a.chosenSnippet = 0, 0
 		a.reload()
@@ -419,6 +421,142 @@ var tabEmpty = []struct {
 	{iconFile, "No files yet", "Files copied in the file manager appear here."},
 }
 
+// chipIcons is the icon of each filter chip, nil for none, in tabLabels order.
+var chipIcons = []*ui.SVG{nil, iconPin, nil, nil, nil, nil, iconSnippet}
+
+// syntaxRows is the search syntax help: what to type and what it does.
+var syntaxRows = [][2]string{
+	{"words", "Every word must match; 3+ letters also match fuzzily"},
+	{`"exact phrase"`, "Match these words exactly, in order"},
+	{"type:link", "text, link, color, image or file"},
+	{"is:pinned", "or is:unpinned"},
+	{"after:7d", "Last used since: 12h, 3d, 2w, today, yesterday, 2026-01-31"},
+	{"before:2026-01-31", "Last used before that day"},
+}
+
+// iconButton is a borderless button showing icon in fg, named label for
+// assistive technology (and Tester.Click), with tip as its tooltip.
+func iconButton(c *ui.Context, icon *ui.SVG, label, tip string, fg ui.Color) ui.Element {
+	t := c.Theme()
+	b := ui.ButtonBase(c).Label(label).Tooltip(tip).Padding(6).Radius(6)
+	if b.Hovered() {
+		b.Background(t.SurfaceHover)
+	}
+	b.Children(func() { ui.Icon(c, icon).Size(16, 16).TextColor(fg) })
+	return b
+}
+
+// rowStyle paints a list row: the chosen row gets an accent tint and an
+// accent bar on its left edge, other rows of a multi-selection a lighter
+// tint, a hovered row the theme's hover face. It returns the color to
+// highlight search matches with. Row text keeps the theme's Text and
+// TextMuted colors in every state.
+func rowStyle(c *ui.Context, row ui.Element, chosen, selected bool) (hl ui.Color) {
+	t := c.Theme()
+	switch {
+	case chosen:
+		accent := t.Accent
+		row.Background(t.Accent.Alpha(0.16)).DrawOver(func(p *ui.Painter, r ui.Rect) {
+			p.Fill(ui.Rect{X: r.X, Y: r.Y + 8, W: 3, H: r.H - 16}, accent, 1.5)
+		})
+		return t.Accent.Alpha(0.35)
+	case selected:
+		row.Background(t.Accent.Alpha(0.10))
+		return t.Accent.Alpha(0.35)
+	case row.Hovered():
+		row.Background(t.SurfaceHover)
+	}
+	return t.Accent.Alpha(0.22)
+}
+
+// filterBar shows the history filters as chips, with Snippets set apart
+// at the end. It is a tab list: arrows, Home and End move the choice
+// while a chip has the focus.
+func (a *app) filterBar(c *ui.Context) {
+	t := c.Theme()
+	tabs := ui.TabsBase(c, &a.tab, len(tabLabels))
+	tabs.List.FillWidth().Padding(2, 16, 10, 16).Gap(6).AlignItems(ui.Center).Children(func() {
+		for i, label := range tabLabels {
+			if i == tabSnippets {
+				ui.Box(c).Grow(1)
+			}
+			on := i == a.tab
+			chip := tabs.Tab(i).Padding(3, 10).Radius(999).Gap(5).AlignItems(ui.Center).Border(1, t.Border)
+			fg := t.TextMuted
+			switch {
+			case on:
+				chip.Background(t.Accent.Alpha(0.16)).BorderColor(t.Accent.Alpha(0.6))
+				fg = t.Text
+			case chip.Hovered():
+				chip.Background(t.SurfaceHover)
+				fg = t.Text
+			}
+			chip.Children(func() {
+				if icon := chipIcons[i]; icon != nil {
+					ui.Icon(c, icon).Size(13, 13).TextColor(fg)
+				}
+				txt := ui.Text(c, label).FontSize(12).SingleLine().TextColor(fg)
+				if on {
+					txt.FontWeight(600)
+				}
+			})
+		}
+	})
+	if tabs.List.Changed() {
+		a.setTab(a.tab)
+	}
+}
+
+// syntaxHelp is the content of the search syntax popover.
+func (a *app) syntaxHelp(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(320).Padding(12).Gap(6).Children(func() {
+		ui.Text(c, "Search syntax").Bold().FontSize(13)
+		for _, r := range syntaxRows {
+			ui.Row(c).Gap(10).Children(func() {
+				ui.Text(c, r[0]).Font("monospace").FontSize(12).Width(120)
+				ui.Text(c, r[1]).FontSize(12).TextColor(t.TextMuted).Wrap().Grow(1)
+			})
+		}
+	})
+}
+
+// hintSpans is the footer's key hints, each key as a keycap.
+func (a *app) hintSpans(t *ui.Theme) []ui.Span {
+	cm := cmdSym()
+	pairs := [][2]string{{"↵", "Copy"}, {"⇧↵", "Plain"}, {cm + "P", "Pin"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
+	switch {
+	case a.tab == tabSnippets:
+		pairs = [][2]string{{"↵", "Copy"}, {cm + "N", "New"}, {cm + "⌫", "Delete"}, {"esc", "Close"}}
+	case a.selected.Len() > 1:
+		pairs[0][1] = "Copy merged"
+	}
+	var spans []ui.Span
+	for i, p := range pairs {
+		action := " " + p[1]
+		if i < len(pairs)-1 {
+			action += "    "
+		}
+		spans = append(spans,
+			ui.Span{Text: " " + p[0] + " ", Size: 10, Weight: 600, Color: t.Text, Background: t.Text.Alpha(0.08), Radius: 4},
+			ui.Span{Text: action, Color: t.TextMuted})
+	}
+	return spans
+}
+
+// footerStatus is the footer's right-hand note, or empty.
+func (a *app) footerStatus() string {
+	switch {
+	case a.tab != tabSnippets && a.selected.Len() > 1:
+		return fmt.Sprintf("%d selected", a.selected.Len())
+	case a.footerNote != "":
+		return a.footerNote
+	case a.shortcut != "":
+		return keys(a.shortcut) + " to show"
+	}
+	return ""
+}
+
 // noMatches fills a list the search found nothing for.
 func (a *app) noMatches(c *ui.Context) {
 	tips := []string{"Try fewer or shorter words."}
@@ -479,15 +617,11 @@ func (a *app) row(r ui.ListRow, now time.Time) {
 	c, i := r.Context, r.Index
 	e := a.items[i]
 	t := c.Theme()
-	on := r.Selected() || i == a.chosen // the keyboard moves a.chosen without filling the selection set
-	bg := ui.Transparent
-	text, muted, hl := t.Text, t.TextMuted, t.Accent.Alpha(0.22)
-	if on {
-		bg = t.Accent.Alpha(0.85)
-		text, muted, hl = t.AccentText, t.AccentText.Alpha(0.75), t.AccentText.Alpha(0.28)
-	}
 	title, detail := rowLines(e)
-	row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8).Background(bg).Children(func() {
+	row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8)
+	hl := rowStyle(c, row, i == a.chosen, r.Selected()) // the keyboard moves a.chosen without filling the selection set
+	text, muted := t.Text, t.TextMuted
+	row.Children(func() {
 		a.leading(c, e, muted)
 		ui.Column(c).Grow(1).Gap(2).Children(func() {
 			a.highlighted(c, title, hl).SingleLine().TextColor(text)
@@ -505,56 +639,62 @@ func (a *app) row(r ui.ListRow, now time.Time) {
 			})
 		})
 	})
-	row.ContextMenu(func(m *ui.Menu) {
-		ids := a.selectedIDs()
-		if len(ids) > 1 && !a.selected.Has(e.ID) {
-			ids = []int64{e.ID}
+	row.ContextMenu(func(m *ui.Menu) { a.entryMenu(m, e) })
+}
+
+// entryMenu fills e's menu, shared by its row's context menu and the
+// preview's More actions button. What it does applies to the
+// multi-selection when e is in one. A choice is noted in a.pending, to
+// run once the view is built.
+func (a *app) entryMenu(m *ui.Menu, e history.Entry) {
+	ids := a.selectedIDs()
+	if len(ids) > 1 && !a.selected.Has(e.ID) {
+		ids = []int64{e.ID}
+	}
+	if len(ids) > 1 {
+		if m.Item(fmt.Sprintf("Copy %d Merged", len(ids))).Chosen() {
+			a.pending = func() { a.copyMerged(ids) }
 		}
-		if len(ids) > 1 {
-			if m.Item(fmt.Sprintf("Copy %d Merged", len(ids))).Chosen() {
-				a.pending = func() { a.copyMerged(ids) }
-			}
-			if m.Item(fmt.Sprintf("Delete %d", len(ids))).Chosen() {
-				a.pending = func() { a.deleteEntries(ids) }
-			}
-			m.Separator()
-		}
-		if m.Item("Copy").Chosen() {
-			a.pending = func() { a.copyEntry(e, false) }
-		}
-		if m.Item("Copy as Plain Text").Chosen() {
-			a.pending = func() { a.copyEntry(e, true) }
-		}
-		if e.Kind == history.KindText || e.Kind == history.KindLink || e.Kind == history.KindColor {
-			m.Submenu("Transform", func(m *ui.Menu) {
-				for _, tr := range transform.All {
-					if m.Item(tr.Name).Chosen() {
-						a.pending = func() { a.copyTransformed(e, tr) }
-					}
-				}
-			})
-		}
-		label := "Pin"
-		if e.Pinned {
-			label = "Unpin"
-		}
-		if m.Item(label).Chosen() {
-			a.pending = func() { a.setPinned(e.ID, !e.Pinned) }
-		}
-		if e.Kind != history.KindImage && m.Item("Save as Snippet…").Chosen() {
-			a.pending = func() { a.saveAsSnippet(e) }
-		}
-		if e.Kind == history.KindLink && m.Item("Open Link").Chosen() {
-			a.pending = func() { openLink(strings.TrimSpace(e.Text)) }
-		}
-		if e.Kind == history.KindFiles && m.Item("Show in Folder").Chosen() {
-			a.pending = func() { showInFolder(strings.Split(e.Text, "\n")[0]) }
+		if m.Item(fmt.Sprintf("Delete %d", len(ids))).Chosen() {
+			a.pending = func() { a.deleteEntries(ids) }
 		}
 		m.Separator()
-		if m.Item("Delete").Chosen() {
-			a.pending = func() { a.deleteEntries([]int64{e.ID}) }
-		}
-	})
+	}
+	if m.Item("Copy").Chosen() {
+		a.pending = func() { a.copyEntry(e, false) }
+	}
+	if m.Item("Copy as Plain Text").Chosen() {
+		a.pending = func() { a.copyEntry(e, true) }
+	}
+	if e.Kind == history.KindText || e.Kind == history.KindLink || e.Kind == history.KindColor {
+		m.Submenu("Transform", func(m *ui.Menu) {
+			for _, tr := range transform.All {
+				if m.Item(tr.Name).Chosen() {
+					a.pending = func() { a.copyTransformed(e, tr) }
+				}
+			}
+		})
+	}
+	label := "Pin"
+	if e.Pinned {
+		label = "Unpin"
+	}
+	if m.Item(label).Chosen() {
+		a.pending = func() { a.setPinned(e.ID, !e.Pinned) }
+	}
+	if e.Kind != history.KindImage && m.Item("Save as Snippet…").Chosen() {
+		a.pending = func() { a.saveAsSnippet(e) }
+	}
+	if e.Kind == history.KindLink && m.Item("Open Link").Chosen() {
+		a.pending = func() { openLink(strings.TrimSpace(e.Text)) }
+	}
+	if e.Kind == history.KindFiles && m.Item("Show in Folder").Chosen() {
+		a.pending = func() { showInFolder(strings.Split(e.Text, "\n")[0]) }
+	}
+	m.Separator()
+	if m.Item("Delete").Chosen() {
+		a.pending = func() { a.deleteEntries([]int64{e.ID}) }
+	}
 }
 
 func openLink(u string) {
@@ -574,18 +714,17 @@ func (a *app) previewPane(c *ui.Context) {
 	if a.preview.ID == e.ID {
 		e = a.preview
 	}
-	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Icon(c, kindIcon(e.Kind)).FontSize(16).TextColor(t.TextMuted)
-		ui.Text(c, kindTitle(e)).Bold().SingleLine().Grow(1)
-		ui.Button(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copyEntry(e, false) })
-		pin := "Pin"
+	ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, kindIcon(e.Kind)).FontSize(14).TextColor(t.TextMuted)
+		ui.Text(c, kindTitle(e)).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1)
+		pin, pinFg := "Pin", t.TextMuted
 		if e.Pinned {
-			pin = "Unpin"
+			pin, pinFg = "Unpin", t.Accent
 		}
-		ui.Button(c, pin).Tooltip(pin + " (" + cmdSym() + "P)").OnClick(func() { a.setPinned(e.ID, !e.Pinned) })
-		ui.Button(c, "Delete").Tooltip("Delete (" + cmdSym() + "⌫)").OnClick(func() { a.deleteEntries([]int64{e.ID}) })
+		iconButton(c, iconPin, pin, pin+" ("+cmdSym()+"P)", pinFg).OnClick(func() { a.setPinned(e.ID, !e.Pinned) })
+		iconButton(c, iconMore, "More actions", "More actions", t.TextMuted).Menu(func(m *ui.Menu) { a.entryMenu(m, e) })
+		ui.PrimaryButton(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copyEntry(e, false) })
 	})
-	ui.Text(c, details(e, time.Now())).FontSize(11).TextColor(t.TextMuted).Wrap()
 	ui.Divider(c)
 	hl := t.Accent.Alpha(0.22)
 	ui.Scroll(c).Grow(1).Children(func() {
@@ -604,16 +743,45 @@ func (a *app) previewPane(c *ui.Context) {
 						ui.Button(c, "Show in Folder").OnClick(func() { showInFolder(p) })
 					})
 				}
+			case history.KindColor:
+				// ui.Hex panics on bad input, and imports can carry an invalid color.
+				if history.TextKind(e.Text) != history.KindColor {
+					a.textBody(c, e, hl)
+					break
+				}
+				col := ui.Hex(strings.TrimSpace(e.Text))
+				hex, rgb := colorValues(col)
+				ui.Box(c).FillWidth().Height(120).Radius(10).Background(col).Border(1, t.Border)
+				ui.Text(c, hex).Font("monospace").FontSize(13).Selectable()
+				ui.Text(c, rgb).Font("monospace").FontSize(13).Selectable()
 			default:
-				text := e.Text
-				if n := utf8.RuneCountInString(text); n > 20000 {
-					text = string([]rune(text)[:20000]) + fmt.Sprintf("… (%d more characters)", n-20000)
-				}
-				a.highlighted(c, text, hl).Wrap().Selectable()
-				if e.Kind == history.KindLink && ui.Button(c, "Open Link").Clicked() {
-					openLink(strings.TrimSpace(e.Text))
-				}
+				a.textBody(c, e, hl)
 			}
 		})
 	})
+	stats := ""
+	if a.preview.ID == e.ID {
+		stats = a.previewStats
+	}
+	ui.Text(c, details(e, stats, time.Now())).FontSize(11).TextColor(t.TextMuted).Wrap()
+	// A More actions choice is reported while this pane builds, after the
+	// list already ran its pending work.
+	a.runPending()
+}
+
+// textBody shows e's text, capped, in monospace when it reads as code, and
+// an Open Link button for links.
+func (a *app) textBody(c *ui.Context, e history.Entry, hl ui.Color) {
+	text := e.Text
+	if n := utf8.RuneCountInString(text); n > 20000 {
+		text = string([]rune(text)[:20000]) + fmt.Sprintf("… (%d more characters)", n-20000)
+	}
+	h := a.highlighted(c, text, hl)
+	if a.preview.ID == e.ID && a.previewCode {
+		h.Font("monospace").FontSize(12)
+	}
+	h.Wrap().Selectable()
+	if e.Kind == history.KindLink && ui.Button(c, "Open Link").Clicked() {
+		openLink(strings.TrimSpace(e.Text))
+	}
 }

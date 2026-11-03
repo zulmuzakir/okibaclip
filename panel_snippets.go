@@ -23,12 +23,10 @@ func (a *app) snippetList(c *ui.Context) {
 	}).Rows(func(r ui.ListRow) {
 		c, i := r.Context, r.Index
 		s := a.snippets[i]
-		on := r.Selected() || i == a.chosenSnippet
-		bg, text, muted, hl := ui.Transparent, t.Text, t.TextMuted, t.Accent.Alpha(0.22)
-		if on {
-			bg, text, muted, hl = t.Accent.Alpha(0.85), t.AccentText, t.AccentText.Alpha(0.75), t.AccentText.Alpha(0.28)
-		}
-		row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8).Background(bg).Children(func() {
+		row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8)
+		hl := rowStyle(c, row, i == a.chosenSnippet, r.Selected())
+		text, muted := t.Text, t.TextMuted
+		row.Children(func() {
 			ui.Icon(c, iconSnippet).FontSize(20).TextColor(muted).Size(28, 28)
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
 				a.highlighted(c, s.Name, hl).SingleLine().TextColor(text)

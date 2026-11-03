@@ -73,6 +73,9 @@ type app struct {
 	search        ui.Handle
 	preview       history.Entry
 	previewBitmap *ui.Bitmap
+	previewStats  string // textStats of preview
+	previewCode   bool   // preview's text looksLikeCode
+	syntaxOpen    bool
 	thumbs        map[int64]*ui.Bitmap
 	gen           uint64
 	previewGen    uint64
@@ -217,6 +220,7 @@ func (a *app) show(o origin) {
 	a.toast, a.toastUndo = "", nil
 	a.footerNote, a.hint = a.hint, ""
 	a.editor.open = false
+	a.syntaxOpen = false
 	a.reload()
 	a.search.Focus()
 	a.panel.Show()
@@ -351,7 +355,7 @@ func (a *app) loadPreview() {
 	a.previewGen++
 	gen := a.previewGen
 	if a.tab == tabSnippets || a.chosen < 0 || a.chosen >= len(a.items) {
-		a.preview, a.previewBitmap = history.Entry{}, nil
+		a.preview, a.previewBitmap, a.previewStats, a.previewCode = history.Entry{}, nil, "", false
 		return
 	}
 	id := a.items[a.chosen].ID
@@ -363,11 +367,18 @@ func (a *app) loadPreview() {
 		if err != nil {
 			return
 		}
+		// Text can be 1 MiB and the view rebuilds often, so count here.
+		var stats string
+		var code bool
+		if e.Kind == history.KindText {
+			stats, code = textStats(e.Text), looksLikeCode(e.Text)
+		}
 		a.post(func() {
 			if gen != a.previewGen {
 				return
 			}
 			a.preview = e
+			a.previewStats, a.previewCode = stats, code
 			a.previewBitmap = nil
 			if e.Kind == history.KindImage {
 				a.previewBitmap, _ = ui.DecodeBitmap(e.Image)

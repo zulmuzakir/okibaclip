@@ -331,3 +331,36 @@ func TestPanelResumeButtonResumesOnce(t *testing.T) {
 		t.Errorf("resumes = %d, want 1", f.mon.resumes)
 	}
 }
+
+func TestPanelMoreMenuDeletesChosenEntry(t *testing.T) {
+	f := newPanelFixture(t, "first", "second")
+	if err := f.tt.Click("More actions"); err != nil {
+		t.Fatalf("%v: %q", err, f.tt.Texts())
+	}
+	if err := f.tt.ChooseMenuItem("Delete"); err != nil {
+		t.Fatalf("%v: %q", err, f.tt.Texts())
+	}
+	f.tt.Frame()
+	if f.tt.HasText("second") || !f.tt.HasText("first") || !f.tt.HasText("Undo") {
+		t.Errorf("delete not applied: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelFilterChipShowsOnlyLinks(t *testing.T) {
+	f := newPanelFixture(t, "plain words")
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindLink, Text: "https://example.com"}, historytest.T0.Add(time.Minute))
+	f.a.reload()
+	f.tt.Frame()
+	if err := f.tt.Click("Links"); err != nil {
+		t.Fatalf("%v: %q", err, f.tt.Texts())
+	}
+	f.tt.Frame()
+	if !f.tt.HasText("https://example.com") || f.tt.HasText("plain words") {
+		t.Fatalf("links chip: %q", f.tt.Texts())
+	}
+	f.tt.Key(ui.Ctrl, ui.KeyTab)
+	f.tt.Frame()
+	if !f.tt.HasText("No images yet") {
+		t.Errorf("next tab: %q", f.tt.Texts())
+	}
+}
