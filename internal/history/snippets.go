@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	"pastello/internal/search"
+	"okibaclip/internal/search"
 )
 
 // Snippet is a named text the user keeps.

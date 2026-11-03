@@ -7,9 +7,9 @@ import (
 
 	"github.com/egoist/mygo/transfer"
 
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
-	"pastello/internal/settings"
+	"okibaclip/internal/history"
+	"okibaclip/internal/history/historytest"
+	"okibaclip/internal/settings"
 )
 
 func richData(reps ...transfer.Representation) transfer.Data {

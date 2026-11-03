@@ -1,6 +1,7 @@
 {
-  "name": "pastello",
-  "identifier": "io.github.zulmuzakir.pastello",
+  "name": "Okiba Clip",
+  "slug": "okibaclip",
+  "identifier": "io.github.zulmuzakir.okibaclip",
   "version": "0.1.0",
   "out": "build",
   "macos": { "infoPlist": { "LSUIElement": true } },

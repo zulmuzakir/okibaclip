@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/egoist/mygo/ui"
 
-	"pastello/internal/history"
+	"okibaclip/internal/history"
 )
 
 // Lucide icons (https://lucide.dev, ISC licence), 24×24.

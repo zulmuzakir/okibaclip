@@ -14,10 +14,10 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
-	"pastello/internal/capture"
-	"pastello/internal/history"
-	"pastello/internal/search"
-	"pastello/internal/settings"
+	"okibaclip/internal/capture"
+	"okibaclip/internal/history"
+	"okibaclip/internal/search"
+	"okibaclip/internal/settings"
 )
 
 type origin int
@@ -130,13 +130,13 @@ func newApp() *app {
 func (a *app) ready() {
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
-		mygo.Dialog.Error("pastello", "Cannot find the data folder: "+err.Error())
+		mygo.Dialog.Error(appName, "Cannot find the data folder: "+err.Error())
 		mygo.App.Quit()
 		return
 	}
 	a.dataDir = dir
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		mygo.Dialog.Error("pastello", "Cannot create "+dir+": "+err.Error())
+		mygo.Dialog.Error(appName, "Cannot create "+dir+": "+err.Error())
 		mygo.App.Quit()
 		return
 	}
@@ -150,13 +150,13 @@ func (a *app) ready() {
 	a.ctx, a.cancel = ctx, cancel
 	a.store, err = history.Open(ctx, filepath.Join(dir, "history.db"))
 	if err != nil {
-		mygo.Dialog.Error("pastello", "Cannot open history: "+err.Error())
+		mygo.Dialog.Error(appName, "Cannot open history: "+err.Error())
 		mygo.App.Quit()
 		return
 	}
 
 	a.panel = mygo.NewWindow(mygo.WindowOptions{
-		Title:         "pastello",
+		Title:         appName,
 		Panel:         true,
 		Hidden:        true,
 		Frameless:     true,

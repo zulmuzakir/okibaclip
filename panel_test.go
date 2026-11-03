@@ -12,9 +12,9 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
-	"pastello/internal/settings"
+	"okibaclip/internal/history"
+	"okibaclip/internal/history/historytest"
+	"okibaclip/internal/settings"
 )
 
 type panelFixture struct {

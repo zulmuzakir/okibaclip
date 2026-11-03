@@ -16,8 +16,8 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 
-	"pastello/internal/history"
-	"pastello/internal/settings"
+	"okibaclip/internal/history"
+	"okibaclip/internal/settings"
 )
 
 type monitorConfig struct {

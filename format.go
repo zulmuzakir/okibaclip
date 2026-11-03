@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"pastello/internal/history"
+	"okibaclip/internal/history"
 )
 
 // preview is the single-line description of an entry.

@@ -10,8 +10,8 @@ import (
 
 	"github.com/egoist/mygo/transfer"
 
-	"pastello/internal/history"
-	"pastello/internal/settings"
+	"okibaclip/internal/history"
+	"okibaclip/internal/settings"
 )
 
 const maxHTMLBytes = 1 << 20

@@ -11,9 +11,9 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
-	"pastello/internal/history"
-	"pastello/internal/search"
-	"pastello/internal/transform"
+	"okibaclip/internal/history"
+	"okibaclip/internal/search"
+	"okibaclip/internal/transform"
 )
 
 var digitKeys = []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5, ui.Key6, ui.Key7, ui.Key8, ui.Key9}

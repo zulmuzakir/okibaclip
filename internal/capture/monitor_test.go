@@ -4,9 +4,9 @@ import (
 	"slices"
 
 	"context"
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
-	"pastello/internal/settings"
+	"okibaclip/internal/history"
+	"okibaclip/internal/history/historytest"
+	"okibaclip/internal/settings"
 	"sync"
 	"testing"
 	"time"

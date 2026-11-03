@@ -5,8 +5,8 @@ import (
 	"image/png"
 	"testing"
 
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
+	"okibaclip/internal/history"
+	"okibaclip/internal/history/historytest"
 )
 
 func TestHashDistinguishesKinds(t *testing.T) {

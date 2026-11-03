@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"pastello/internal/history"
+	"okibaclip/internal/history"
 )
 
 func TestRowLines(t *testing.T) {

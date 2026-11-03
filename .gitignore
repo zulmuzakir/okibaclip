@@ -1,8 +1,8 @@
 /build/
 /.mygo/
 mygo_windows_*.syso
-/pastello
-/pastello.exe
+/okibaclip
+/okibaclip.exe
 .DS_Store
 *.test
 *.out

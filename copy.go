@@ -9,8 +9,8 @@ import (
 
 	"github.com/egoist/mygo/transfer"
 
-	"pastello/internal/history"
-	"pastello/internal/transform"
+	"okibaclip/internal/history"
+	"okibaclip/internal/transform"
 )
 
 // textData offers text, and HTML when given.

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-pastello is a clipboard history manager for macOS 12+, Windows 10/11 and Linux (GTK 3), built on [mygo](https://github.com/egoist/mygo) (pinned at v0.7.4) with its native immediate-mode `ui` package. It runs in the tray or menu bar with no Dock icon. It records text, rich text, links, colors, images and files, and opens a searchable panel from a global shortcut (default `Alt+Shift+V`). The panel also has snippets, text transforms and export/import. The app was formerly named my-clipboard; see "Upgrading from my-clipboard" in `README.md`.
+Okiba Clip (slug `okibaclip`) is a clipboard history manager for macOS 12+, Windows 10/11 and Linux (GTK 3), built on [mygo](https://github.com/egoist/mygo) (pinned at v0.7.4) with its native immediate-mode `ui` package. It runs in the tray or menu bar with no Dock icon. It records text, rich text, links, colors, images and files, and opens a searchable panel from a global shortcut (default `Alt+Shift+V`). The panel also has snippets, text transforms and export/import.
 
 Product constraints to keep:
 - No keystroke injection and no Accessibility permission. Choosing an entry copies it and hides the panel; the user pastes.
@@ -23,7 +23,7 @@ flowchart LR
 ```
 
 - **`main.go`:**
-  - Sets the app name, takes the single-instance lock, runs `migrateDataDir` (`my-clipboard` → `pastello`) and `configureLinuxBackend` (Wayland/XWayland), then runs the app.
+  - Sets the app name, takes the single-instance lock, points `PathUserData` at the `okibaclip` folder and runs `configureLinuxBackend` (Wayland/XWayland), then runs the app.
   - `app.ready()` (`app.go`) opens `settings.json` and `history.db` from `mygo.App.Path(mygo.PathUserData)`, then builds the panel, tray and shortcut.
 - **`app` struct (`app.go`):** the single owner of state. View state (`items`, `query`, `tab`, `selected`, `list`, `gen`/`previewGen`…) is touched only on the main thread.
 - **Monitor (`internal/capture/monitor.go`):** polls the clipboard. It uses a change token on macOS and Windows (`token_*.go`, build-tagged) and a content fingerprint elsewhere. Captures upsert by content hash (`history.Capture.Hash`), then `Prune` runs.
@@ -38,8 +38,7 @@ flowchart LR
   - When `MoveToTopOnCopy` is on, `copyEntry` doesn't suppress on purpose; it `Touch`es the entry after a successful write instead.
 - **CLI (`app.command`):** a second launch forwards `--toggle|--show|--hide|--settings|--pause|--resume|--quit` to the running instance. A bare launch shows the panel.
 - **Export/import (`exportimport.go`, `internal/history/export.go`):**
-  - Writes format `pastello-export`, version 1.
-  - Import also accepts legacy `my-clipboard-export`.
+  - Writes format `okibaclip-export`, version 1.
   - Imports are capped at 512 MiB (`MaxImportSize`).
 
 ## Key Directories
@@ -89,18 +88,18 @@ Format with `gofmt`. There is no other linter.
   - Work that would mutate a collection while it's being built goes into `a.pending` and runs after the list is built.
   - Full rules: `.agents/skills/mygo-maintenance/SKILL.md`.
 - **Errors:**
-  - Startup failures call `mygo.Dialog.Error("pastello", …)`, then `mygo.App.Quit()`.
+  - Startup failures call `mygo.Dialog.Error(appName, …)`, then `mygo.App.Quit()`.
   - User actions report through toasts (`a.toast`, with an undo list in `toastUndo`), or through `copyResult{ok, toast, err}` for copies.
   - Background problems are logged with `slog.Warn` / `slog.Error`.
 - **Settings:** always pass settings through `settings.Normalize`, which clamps entries, retention, image size and poll interval. Persist with `settings.Save`, which writes a temp file and renames it with mode 0600.
 - **Platform code:**
   - Prefer build-tagged files (`token_darwin.go`, `token_windows.go`, `token_other.go`).
   - For small differences, use runtime checks (`isDarwin`, `a.waylandMode`).
-  - The env var `PASTELLO_NATIVE_WAYLAND=1` disables the forced XWayland.
+  - The env var `OKIBACLIP_NATIVE_WAYLAND=1` disables the forced XWayland.
 - **Identity:**
-  - The app name `pastello` sets the data folder name.
-  - The identifier `io.github.zulmuzakir.pastello` (`mygo.json`) sets the macOS bundle ID, login-item keys and the Windows uninstall key.
-  - Changing either strands user data or settings tied to the old value; see `migrateDataDir` in `main.go`.
+  - `appName` ("Okiba Clip", `main.go`) is the display name: menus, dialogs, tray, login items and the single-instance key. Use the constant in UI strings.
+  - `dataDirName` (`okibaclip`) names the data folder. `mygo.json` sets the display `name`, the ASCII `slug` (executable, packages, installers) and the identifier `io.github.zulmuzakir.okibaclip`, which sets the macOS bundle ID, login-item keys and the Windows uninstall key.
+  - Changing the data folder or identifier after a release strands user data or settings tied to the old value, so it then needs a migration in `main.go`.
 - **Naming:** unexported, short, lowerCamel helpers (`refreshData`, `copyEntry`, `applyShortcut`). Tests are named after the behavior, e.g. `TestPanel<Behavior>`, `TestMonitor<Behavior>`, `TestPruneKeepsPinnedAndRespectsMaxAndRetention`.
 
 ## Important Files

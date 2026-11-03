@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"pastello/internal/history"
-	"pastello/internal/history/historytest"
-	"pastello/internal/search"
+	"okibaclip/internal/history"
+	"okibaclip/internal/history/historytest"
+	"okibaclip/internal/search"
 )
 
 // query parses s as typed in the panel, with relative dates from T0.
@@ -313,14 +313,12 @@ func TestExportImportRoundTrip(t *testing.T) {
 }
 
 func TestDecodeExportRejects(t *testing.T) {
-	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"pastello-export","version":2}`} {
+	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"okibaclip-export","version":2}`} {
 		if _, err := history.DecodeExport([]byte(in)); err == nil {
 			t.Errorf("accepted %s", in)
 		}
 	}
-	for _, format := range []string{"pastello-export", "my-clipboard-export"} {
-		if _, err := history.DecodeExport([]byte(`{"format":"` + format + `","version":1,"entries":[],"snippets":[]}`)); err != nil {
-			t.Errorf("%s: %v", format, err)
-		}
+	if _, err := history.DecodeExport([]byte(`{"format":"okibaclip-export","version":1,"entries":[],"snippets":[]}`)); err != nil {
+		t.Error(err)
 	}
 }

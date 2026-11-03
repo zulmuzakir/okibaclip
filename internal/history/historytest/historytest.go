@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"pastello/internal/history"
+	"okibaclip/internal/history"
 )
 
 // T0 is a fixed point in time for test data.

@@ -13,7 +13,7 @@ import (
 
 	"github.com/egoist/mygo/plugins/sqlite"
 
-	"pastello/internal/search"
+	"okibaclip/internal/search"
 )
 
 // Store is the SQLite history and snippet database.
