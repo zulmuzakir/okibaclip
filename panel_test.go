@@ -287,6 +287,26 @@ func TestPanelDeleteAndUndo(t *testing.T) {
 	}
 }
 
+// The panel opens with the search field focused, which takes Backspace
+// with any modifier for text editing unless the panel claims ⌘⌫ first.
+func TestPanelDeleteShortcutWorksWhileSearchFocused(t *testing.T) {
+	for _, query := range []string{"", "sec"} {
+		f := newPanelFixture(t, "first", "second")
+		f.a.search.Focus()
+		f.tt.Frame()
+		f.tt.Type(query)
+		f.tt.Frame()
+		f.tt.Key(ui.Cmd, ui.KeyBackspace)
+		f.tt.Frame()
+		if f.tt.HasText("second") || !f.tt.HasText("Undo") {
+			t.Errorf("query %q: not deleted: %q", query, f.tt.Texts())
+		}
+		if f.a.query != query {
+			t.Errorf("query %q: search text edited to %q", query, f.a.query)
+		}
+	}
+}
+
 func TestPanelMultiSelectMerge(t *testing.T) {
 	f := newPanelFixture(t, "c", "b", "a") // list: a, b, c
 	f.tt.Click("a")

@@ -242,13 +242,16 @@ func (a *app) view(c *ui.Context) {
 	ui.Column(c).Fill().Children(func() {
 		ui.Row(c).Padding(14, 16).Gap(10).AlignItems(ui.Center).Children(func() {
 			ui.Icon(c, iconSearch).FontSize(16).TextColor(t.TextMuted)
-			// The field takes Enter, and ←/→ while empty, before the panel's shortcuts see them.
+			// The field takes Enter, ⌘⌫, and ←/→ while empty, before the panel's shortcuts see them.
 			in := ui.TextInputBase(c, &a.query).Bind(&a.search).Grow(1).FontSize(16).
 				Placeholder("Search clipboard…").Label("Search clipboard").
 				OnTextKey(func(k ui.TextKey) bool {
 					switch {
 					case k.Key == ui.KeyEnter:
 						a.copyChosen(k.Mods&ui.Shift != 0)
+						return true
+					case k.Mods == ui.Cmd && k.Key == ui.KeyBackspace:
+						a.deleteChosen()
 						return true
 					case k.Mods == 0 && (k.Key == ui.KeyLeft || k.Key == ui.KeyRight) && k.Text() == "":
 						// An empty field has no caret to move: the arrows switch filters.
@@ -341,19 +344,22 @@ func (a *app) shortcuts(c *ui.Context) {
 			a.setPinned(e.ID, !e.Pinned)
 		}
 	})
-	c.OnShortcut(ui.Cmd, ui.KeyBackspace, func() {
-		if s, ok := a.chosenSnip(); ok {
-			a.deleteSnippet(s)
-			return
-		}
-		a.deleteEntries(a.selectedIDs())
-	})
+	c.OnShortcut(ui.Cmd, ui.KeyBackspace, a.deleteChosen)
 	c.OnShortcut(ui.Ctrl, ui.KeyTab, func() { a.setTab(a.tab + 1) })
 	c.OnShortcut(ui.Ctrl|ui.Shift, ui.KeyTab, func() { a.setTab(a.tab - 1) })
 	c.OnShortcut(ui.Cmd, ui.KeyF, func() { a.search.Focus() })
 	c.OnShortcut(ui.Cmd, ui.KeyN, func() { a.newSnippet("", "") })
 	c.OnShortcut(ui.Cmd, ui.KeyComma, a.openSettings)
 	c.OnShortcut(ui.Cmd, ui.KeyQ, mygo.App.Quit)
+}
+
+// deleteChosen deletes the chosen snippet, or the selected or chosen entries.
+func (a *app) deleteChosen() {
+	if s, ok := a.chosenSnip(); ok {
+		a.deleteSnippet(s)
+		return
+	}
+	a.deleteEntries(a.selectedIDs())
 }
 
 func (a *app) deleteSnippet(s history.Snippet) {
