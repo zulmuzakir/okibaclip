@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
+
+	"okibaclip/internal/history"
 )
 
 func (a *app) snippetList(c *ui.Context) {
@@ -12,69 +16,105 @@ func (a *app) snippetList(c *ui.Context) {
 	a.snipList.Label = func(i int) string { return a.snippets[i].Name }
 	a.snipList.Selected = &a.chosenSnippet
 	a.folderSelect(c)
-	list := ui.List(c.Key("snippets"), &a.snipList, len(a.snippets)).
-		ItemKey(func(i int) any { return a.snippets[i].ID }).
-		Grow(1).Padding(6).Children(func() {
-		switch {
-		case len(a.snippets) > 0:
-		case len(a.shown.Terms) > 0:
-			a.noMatches(c)
-		default:
-			emptyState(c, iconSnippet, "No snippets yet", "Press "+cmdSym()+"N to create one, or right-click a history entry and choose Save as Snippet…")
-			ui.Column(c).FillWidth().AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "Create Snippet").Clicked() {
-					a.newSnippet("", "")
+	ui.Themed(c, a.listTheme(t)).Background(ui.Transparent).Grow(1).Children(func() {
+		list := ui.List(c.Key("snippets"), &a.snipList, len(a.snippets)).
+			ItemKey(func(i int) any { return a.snippets[i].ID }).
+			Grow(1).Padding(6).Children(func() {
+			switch {
+			case len(a.snippets) > 0:
+			case len(a.shown.Terms) > 0:
+				a.noMatches(c)
+			default:
+				emptyState(c, iconSnippet, "No snippets yet", "Press "+cmdSym()+"N to create one, or right-click a history entry and choose Save as Snippet…")
+				ui.Themed(c, t).Background(ui.Transparent).FillWidth().AlignItems(ui.Center).Children(func() {
+					if ui.PrimaryButton(c, "Create Snippet").Clicked() {
+						a.newSnippet("", "")
+					}
+				})
+			}
+		}).Rows(func(r ui.ListRow) {
+			c, i := r.Context, r.Index
+			s := a.snippets[i]
+			row := ui.Row(c).Padding(8, 10).Gap(12).AlignItems(ui.Center).Radius(10)
+			hl := rowStyle(t, row, i == a.chosenSnippet, r.Selected())
+			text, muted := t.Text, t.TextMuted
+			row.Children(func() {
+				ui.Icon(c, iconSnippet).FontSize(20).TextColor(muted).Size(28, 28)
+				ui.Column(c).Grow(1).Gap(2).Children(func() {
+					a.highlighted(c, s.Name, hl).SingleLine().TextColor(text)
+					a.highlighted(c, textPreview(s.Body, 80), hl).FontSize(11).SingleLine().TextColor(muted)
+				})
+				if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+					ui.Text(c, keys(s.Shortcut)).FontSize(10).TextColor(muted)
 				}
 			})
+			row.ContextMenu(func(m *ui.Menu) { a.snippetMenu(m, s) })
+		})
+		if list.Submitted() {
+			a.copyChosen(false)
 		}
-	}).Rows(func(r ui.ListRow) {
-		c, i := r.Context, r.Index
-		s := a.snippets[i]
-		row := ui.Row(c).Padding(8, 10).Gap(12).AlignItems(ui.Center).Radius(10)
-		hl := rowStyle(c, row, i == a.chosenSnippet, r.Selected())
-		text, muted := t.Text, t.TextMuted
-		row.Children(func() {
-			ui.Icon(c, iconSnippet).FontSize(20).TextColor(muted).Size(28, 28)
-			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				a.highlighted(c, s.Name, hl).SingleLine().TextColor(text)
-				a.highlighted(c, textPreview(s.Body, 80), hl).FontSize(11).SingleLine().TextColor(muted)
-			})
-			if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
-				ui.Text(c, keys(s.Shortcut)).FontSize(10).TextColor(muted)
-			}
-		})
-		row.ContextMenu(func(m *ui.Menu) {
-			if m.Item("Copy").Chosen() {
-				a.pending = func() { a.copySnippet(s) }
-			}
-			if m.Item("Edit…").Chosen() {
-				a.pending = func() {
-					a.editor.open, a.editor.id, a.editor.name, a.editor.body, a.editor.err = true, s.ID, s.Name, s.Body, ""
-					a.editor.folder, a.editor.shortcut = s.Folder, s.Shortcut
-				}
-			}
-			m.Separator()
-			if m.Item("Delete").Chosen() {
-				a.pending = func() { a.deleteSnippet(s) }
-			}
-		})
 	})
-	if list.Submitted() {
-		a.copyChosen(false)
-	}
 	a.runPending()
 }
 
+// snippetMenu fills s's menu, shared by its row's context menu and the
+// preview's More actions button. A choice is noted in a.pending.
+func (a *app) snippetMenu(m *ui.Menu, s history.Snippet) {
+	if m.Item("Copy").Chosen() {
+		a.pending = func() { a.copySnippet(s) }
+	}
+	if m.Item("Edit…").Chosen() {
+		a.pending = func() {
+			a.editor.open, a.editor.id, a.editor.name, a.editor.body, a.editor.err = true, s.ID, s.Name, s.Body, ""
+			a.editor.folder, a.editor.shortcut = s.Folder, s.Shortcut
+		}
+	}
+	m.Separator()
+	if m.Item("Delete").Chosen() {
+		a.pending = func() { a.deleteSnippet(s) }
+	}
+}
+
 func (a *app) snippetPreview(c *ui.Context) {
+	t := c.Theme()
 	s, ok := a.chosenSnip()
 	if !ok {
 		return
 	}
-	hl := c.Theme().Accent.Alpha(0.22)
-	a.highlighted(c, s.Name, hl).Bold()
+	hl := t.Accent.Alpha(0.22)
+	ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, iconSnippet).FontSize(14).TextColor(t.TextMuted)
+		kind := "Snippet"
+		if s.Folder != "" {
+			kind = s.Folder
+		}
+		ui.Text(c, kind).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1)
+		iconButton(c, iconMore, "More actions", "More actions", t.TextMuted).Menu(func(m *ui.Menu) { a.snippetMenu(m, s) })
+		ui.PrimaryButton(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copySnippet(s) })
+	})
+	a.highlighted(c, s.Name, hl).Bold().FontSize(15)
 	ui.Scroll(c).Grow(1).Children(func() {
 		a.highlighted(c, strings.TrimRight(s.Body, "\n"), hl).Wrap().Selectable()
 	})
+	ui.Text(c, a.snippetDetails(s)).FontSize(11).TextColor(t.TextMuted).Wrap()
+	// A More actions choice is reported while this pane builds.
+	a.runPending()
+}
+
+// snippetDetails is the preview's footnote: length, the global shortcut
+// when registered, and how often it was used.
+func (a *app) snippetDetails(s history.Snippet) string {
+	parts := []string{fmt.Sprintf("%d characters", utf8.RuneCountInString(s.Body))}
+	if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+		parts = append(parts, "shortcut "+keys(s.Shortcut))
+	}
+	switch {
+	case s.UseCount == 1:
+		parts = append(parts, "used once")
+	case s.UseCount > 1:
+		parts = append(parts, fmt.Sprintf("used %d times", s.UseCount))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (a *app) editorModal(c *ui.Context) {
@@ -83,17 +123,26 @@ func (a *app) editorModal(c *ui.Context) {
 		return
 	}
 	ui.Modal(c, &a.editor.open, func() {
-		ui.Column(c).Width(440).Padding(16).Gap(10).Children(func() {
+		ui.Column(c).Width(440).Padding(16).Gap(8).Children(func() {
 			title := "New Snippet"
 			if a.editor.id != 0 {
 				title = "Edit Snippet"
 			}
 			ui.Text(c, title).Bold().FontSize(16)
-			ui.TextInput(c, &a.editor.name).Label("Name").Placeholder("Name").Width(408)
-			ui.TextArea(c, &a.editor.body).Label("Body").Placeholder("Body").Width(408).Height(160)
-			ui.Text(c, "Placeholders: {date} {time} {datetime} {clipboard} {cursor}").FontSize(11).TextColor(t.TextMuted)
-			ui.TextInput(c, &a.editor.folder).Label("Folder").Placeholder("No folder").Width(408)
-			ui.TextInput(c, &a.editor.shortcut).Label("Shortcut").Placeholder("e.g. CmdOrCtrl+Alt+1").Width(408)
+			ui.Field(c, "Name", func() {
+				ui.TextInput(c, &a.editor.name).Label("Name").Placeholder("e.g. Email sign-off").Width(408)
+			})
+			ui.Field(c, "Body", func() {
+				ui.TextArea(c, &a.editor.body).Label("Body").Placeholder("Text to paste").Width(408).Height(110)
+			}).Description("Placeholders: {date} {time} {datetime} {clipboard} {cursor}")
+			ui.Row(c).Gap(12).Children(func() {
+				ui.Field(c, "Folder", func() {
+					ui.TextInput(c, &a.editor.folder).Label("Folder").Placeholder("None").Width(198)
+				})
+				ui.Field(c, "Shortcut", func() {
+					ui.TextInput(c, &a.editor.shortcut).Label("Shortcut").Placeholder("e.g. CmdOrCtrl+Alt+1").Width(198)
+				})
+			})
 			if a.editor.err != "" {
 				ui.Text(c, a.editor.err).TextColor(t.Danger).FontSize(12)
 			}
@@ -119,7 +168,8 @@ func (a *app) folderSelect(c *ui.Context) {
 		a.snipFolderSel = allFolders
 	}
 	opts := append(append([]string{allFolders}, a.snipFolders...), noFolder)
-	ui.Row(c).Padding(6, 6, 0, 6).Children(func() {
+	ui.Row(c).Padding(4, 6, 2, 12).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, iconFolder).Size(14, 14).TextColor(c.Theme().TextMuted)
 		if ui.Select(c, &a.snipFolderSel, opts).Label("Folder").Grow(1).Changed() {
 			a.snipFolder = a.snipFolderSel
 			if a.snipFolder == allFolders {

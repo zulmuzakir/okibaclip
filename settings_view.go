@@ -38,6 +38,8 @@ type settingsState struct {
 
 var settingsTabs = []string{"General", "History", "Data", "About"}
 
+var settingsIcons = []*ui.SVG{iconSettings, iconHistory, iconDatabase, iconInfo}
+
 func pollLabel(ms int) string { return fmt.Sprintf("%d ms", ms) }
 
 // pollChoices are the labels of settings.PollIntervals.
@@ -206,40 +208,86 @@ func (a *app) saveShortcut(acc string) {
 }
 
 func (a *app) settingsView(c *ui.Context) {
-	t := c.Theme()
 	s := &a.settingsUI
 	if s.toast != "" {
 		c.Toast(s.toast)
 		s.toast = ""
 	}
 	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Hide() })
-	ui.Column(c).Fill().Padding(16).Gap(12).Children(func() {
-		ui.Tabs(c, &s.tab, settingsTabs...)
+	ui.Column(c).Fill().Children(func() {
+		tabs := ui.TabsBase(c, &s.tab, len(settingsTabs))
+		tabs.List.FillWidth().Padding(14, 16, 10, 16).Gap(6).AlignItems(ui.Center).Children(func() {
+			for i, label := range settingsTabs {
+				pillTab(c, tabs.Tab(i), i == s.tab, settingsIcons[i], label)
+			}
+		})
 		ui.Scroll(c).Grow(1).Children(func() {
-			ui.Column(c).Gap(14).Padding(4, 4, 16, 4).Children(func() {
+			ui.Column(c).Gap(18).Padding(6, 16, 20, 16).Children(func() {
 				switch s.tab {
 				case 0:
-					a.generalSection(c, t)
+					a.generalSection(c)
 				case 1:
-					a.historySection(c, t)
+					a.historySection(c)
 				case 2:
-					a.dataSection(c, t)
+					a.dataSection(c)
 				case 3:
-					a.aboutSection(c, t)
+					a.aboutSection(c)
 				}
 			})
 		})
 	})
 }
 
-func help(c *ui.Context, t *ui.Theme, text string) {
-	ui.Text(c, text).FontSize(11).TextColor(t.TextMuted).Wrap()
+// settingsGroup is a titled card of settings.
+func settingsGroup(c *ui.Context, title string, fn func()) {
+	t := c.Theme()
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(t.TextMuted).Margin(0, 0, 0, 4)
+		ui.Column(c).Padding(4, 14).Radius(12).Background(t.Text.Alpha(0.04)).Children(fn)
+	})
 }
 
-func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
+// settingRow is one setting: its name, help and error stacked on the
+// left, the controls fn builds on the right; fn nil builds none. Empty
+// help or err shows nothing.
+func settingRow(c *ui.Context, label, help, err string, fn func()) {
+	t := c.Theme()
+	ui.Row(c).Padding(10, 0).Gap(16).AlignItems(ui.Center).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
+			ui.Text(c, label).FontSize(13)
+			if help != "" {
+				ui.Text(c, help).FontSize(11).TextColor(t.TextMuted).Wrap()
+			}
+			if err != "" {
+				ui.Text(c, err).FontSize(11).TextColor(t.Danger).Wrap()
+			}
+		})
+		if fn != nil {
+			ui.Row(c).Shrink(0).Gap(8).AlignItems(ui.Center).Children(fn)
+		}
+	})
+}
+
+// settingBlock is a setting whose controls take the card's width below
+// its name: text areas and rows of several controls.
+func settingBlock(c *ui.Context, label, help, err string, fn func()) {
+	t := c.Theme()
+	ui.Column(c).Padding(10, 0).Gap(6).Children(func() {
+		ui.Text(c, label).FontSize(13)
+		fn()
+		if help != "" {
+			ui.Text(c, help).FontSize(11).TextColor(t.TextMuted).Wrap()
+		}
+		if err != "" {
+			ui.Text(c, err).FontSize(11).TextColor(t.Danger).Wrap()
+		}
+	})
+}
+
+func (a *app) generalSection(c *ui.Context) {
 	s := &a.settingsUI
-	ui.Form(c, func() {
-		ui.Field(c, "Open at login", func() {
+	settingsGroup(c, "Startup", func() {
+		settingRow(c, "Open at login", "", s.loginErr, func() {
 			if ui.Switch(c, &s.login).Label("Open at login").Changed() {
 				if err := mygo.App.SetOpenAtLogin(s.login); err != nil {
 					s.login = !s.login
@@ -249,11 +297,14 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 					a.refreshTray()
 				}
 			}
-			if s.loginErr != "" {
-				ui.Text(c, s.loginErr).FontSize(11).TextColor(t.Danger).Wrap()
-			}
 		})
-		ui.Field(c, "Global shortcut", func() {
+	})
+	settingsGroup(c, "Shortcut", func() {
+		shortErr := s.shortErr
+		if shortErr == "" && a.shortcut == "" && a.shortcutErr != "" {
+			shortErr = "No shortcut registered: " + a.shortcutErr
+		}
+		settingBlock(c, "Global shortcut", "Format: CmdOrCtrl+Shift+V. Modifiers: CmdOrCtrl, Cmd, Ctrl, Alt, Shift, Super.", shortErr, func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.TextInput(c, &s.shortcut).Label("Global shortcut").Grow(1)
 				if ui.Button(c, "Apply").Clicked() {
@@ -263,14 +314,29 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 					a.saveShortcut("")
 				}
 			})
-			help(c, t, "Format: CmdOrCtrl+Shift+V. Modifiers: CmdOrCtrl, Cmd, Ctrl, Alt, Shift, Super.")
-			if s.shortErr != "" {
-				ui.Text(c, s.shortErr).FontSize(11).TextColor(t.Danger).Wrap()
-			} else if a.shortcut == "" && a.shortcutErr != "" {
-				ui.Text(c, "No shortcut registered: "+a.shortcutErr).FontSize(11).TextColor(t.Danger).Wrap()
-			}
 		})
-		ui.Field(c, "Paste after choosing", func() {
+		if isLinux {
+			settingBlock(c, "Desktop shortcut", "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs this command.", "", func() {
+				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, s.toggleCmd).Font("monospace").FontSize(12).Wrap().Selectable().Grow(1).MinWidth(0)
+					if ui.Button(c, "Copy Command").Clicked() {
+						cmd := s.toggleCmd
+						if err := a.write(textHash(cmd), textData(cmd, "")); err != nil {
+							c.Toast("Copy failed: " + err.Error())
+						} else {
+							c.Toast("Command copied")
+						}
+					}
+				})
+			})
+		}
+	})
+	settingsGroup(c, "Pasting", func() {
+		msg := "Sends " + pasteKey() + " to the app you were in after you choose an entry."
+		if a.pasteNote != "" {
+			msg += " " + a.pasteNote
+		}
+		settingRow(c, "Paste after choosing", msg, "", func() {
 			sw := ui.Switch(c, &s.form.PasteAfterCopy).Label("Paste after choosing").Disabled(!a.pasteOK)
 			if sw.Changed() {
 				if s.form.PasteAfterCopy && isDarwin {
@@ -278,30 +344,12 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 				}
 				a.applySettings()
 			}
-			msg := "Sends " + pasteKey() + " to the app you were in after you choose an entry."
-			if a.pasteNote != "" {
-				msg += " " + a.pasteNote
-			}
-			help(c, t, msg)
-			if isDarwin && s.form.PasteAfterCopy && !a.paster.Trusted(false) {
-				ui.Text(c, "Allow "+appName+" in System Settings › Privacy & Security › Accessibility").FontSize(11).TextColor(t.Danger).Wrap()
-				if ui.Button(c, "Open Accessibility Settings").Clicked() {
+		})
+		if isDarwin && s.form.PasteAfterCopy && !a.paster.Trusted(false) {
+			settingRow(c, "Accessibility access", "", "Allow "+appName+" in System Settings › Privacy & Security › Accessibility", func() {
+				if ui.Button(c, "Open Settings").Clicked() {
 					if err := mygo.Shell.OpenExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"); err != nil {
 						s.toast = err.Error()
-					}
-				}
-			}
-		})
-		if isLinux {
-			ui.Field(c, "Desktop shortcut", func() {
-				help(c, t, "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs:")
-				ui.Text(c, s.toggleCmd).Wrap().Selectable()
-				if ui.Button(c, "Copy Command").Clicked() {
-					cmd := s.toggleCmd
-					if err := a.write(textHash(cmd), textData(cmd, "")); err != nil {
-						c.Toast("Copy failed: " + err.Error())
-					} else {
-						c.Toast("Command copied")
 					}
 				}
 			})
@@ -309,69 +357,68 @@ func (a *app) generalSection(c *ui.Context, t *ui.Theme) {
 	})
 }
 
-func (a *app) historySection(c *ui.Context, t *ui.Theme) {
+func (a *app) historySection(c *ui.Context) {
 	s := &a.settingsUI
-	ui.Form(c, func() {
-		ui.Field(c, "Max entries", func() {
-			if ui.NumberInput(c, &s.maxEntries, 50, 5000, 50).Label("Max entries").Changed() {
+	sw := func(label, help string, v *bool) {
+		settingRow(c, label, help, "", func() {
+			if ui.Switch(c, v).Label(label).Changed() {
 				a.applySettings()
 			}
 		})
-		ui.Field(c, "Keep for days", func() {
-			if ui.NumberInput(c, &s.retention, 0, 3650, 1).Label("Keep for days").Changed() {
-				a.applySettings()
-			}
-			help(c, t, "0 keeps forever")
-		})
-		sw := func(label string, v *bool) {
-			ui.Field(c, label, func() {
-				if ui.Switch(c, v).Label(label).Changed() {
-					a.applySettings()
-				}
-			})
-		}
-		sw("Capture images", &s.form.CaptureImages)
-		sw("Capture files", &s.form.CaptureFiles)
-		ui.Field(c, "Max image size (MB)", func() {
-			if ui.NumberInput(c, &s.imageMB, 1, 50, 1).Label("Max image size (MB)").Changed() {
+	}
+	settingsGroup(c, "Limits", func() {
+		settingRow(c, "Max entries", "", "", func() {
+			if ui.NumberInput(c, &s.maxEntries, 50, 5000, 50).Label("Max entries").Width(140).Changed() {
 				a.applySettings()
 			}
 		})
-		ui.Field(c, "Storage limit (MB)", func() {
-			if ui.NumberInput(c, &s.storageMB, 100, 20480, 100).Label("Storage limit (MB)").Changed() {
-				a.applySettings()
-			}
-			help(c, t, "Oldest unpinned entries are removed when history passes this size. Pinned entries count toward it but are never removed.")
-		})
-		sw("Skip passwords & concealed copies", &s.form.SkipSensitive)
-		sw("Move copied entry to top", &s.form.MoveToTopOnCopy)
-		ui.Field(c, "Check clipboard every", func() {
-			if ui.Select(c, &s.poll, pollChoices).Label("Check clipboard every").Changed() {
+		settingRow(c, "Keep for days", "0 keeps forever", "", func() {
+			if ui.NumberInput(c, &s.retention, 0, 3650, 1).Label("Keep for days").Width(140).Changed() {
 				a.applySettings()
 			}
 		})
-		ui.Field(c, "Ignore patterns", func() {
-			if ui.TextArea(c, &s.patterns).Label("Ignore patterns").Height(110).Changed() {
+		settingRow(c, "Storage limit (MB)", "Oldest unpinned entries are removed when history passes this size. Pinned entries count toward it but are never removed.", "", func() {
+			if ui.NumberInput(c, &s.storageMB, 100, 20480, 100).Label("Storage limit (MB)").Width(140).Changed() {
 				a.applySettings()
-			}
-			help(c, t, "One regular expression per line. Text matching one entirely is not recorded.")
-			if s.patErr != "" {
-				ui.Text(c, s.patErr).FontSize(11).TextColor(t.Danger).Wrap()
 			}
 		})
-		ui.Field(c, "Ignore apps", func() {
-			if ui.TextArea(c, &s.ignoreApps).Label("Ignore apps").Height(80).Changed() {
+		settingRow(c, "Max image size (MB)", "", "", func() {
+			if ui.NumberInput(c, &s.imageMB, 1, 50, 1).Label("Max image size (MB)").Width(140).Changed() {
 				a.applySettings()
 			}
-			help(c, t, "One per line: bundle ID or app name on macOS (com.agilebits.onepassword7), executable on Windows (keepass.exe), window class on Linux X11. Copies from these apps are not recorded.")
+		})
+	})
+	settingsGroup(c, "Capture", func() {
+		sw("Capture images", "", &s.form.CaptureImages)
+		sw("Capture files", "", &s.form.CaptureFiles)
+		sw("Skip passwords & concealed copies", "", &s.form.SkipSensitive)
+		settingRow(c, "Check clipboard every", "", "", func() {
+			if ui.Select(c, &s.poll, pollChoices).Label("Check clipboard every").Width(140).Changed() {
+				a.applySettings()
+			}
+		})
+	})
+	settingsGroup(c, "Behavior", func() {
+		sw("Move copied entry to top", "", &s.form.MoveToTopOnCopy)
+	})
+	settingsGroup(c, "Ignore", func() {
+		settingBlock(c, "Ignore patterns", "One regular expression per line. Text matching one entirely is not recorded.", s.patErr, func() {
+			if ui.TextArea(c, &s.patterns).Label("Ignore patterns").FillWidth().Height(90).Changed() {
+				a.applySettings()
+			}
+		})
+		settingBlock(c, "Ignore apps", "One per line: bundle ID or app name on macOS (com.agilebits.onepassword7), executable on Windows (keepass.exe), window class on Linux X11. Copies from these apps are not recorded.", "", func() {
+			if ui.TextArea(c, &s.ignoreApps).Label("Ignore apps").FillWidth().Height(70).Changed() {
+				a.applySettings()
+			}
 			if len(s.recentApps) > 0 {
-				ui.Row(c).Gap(6).Children(func() {
+				ui.Row(c).Wrap().Gap(6).Children(func() {
 					for _, app := range s.recentApps {
 						name := app.Name
 						if name == "" {
 							name = app.App
 						}
-						if ui.Button(c, name).Clicked() {
+						if pillButton(c, iconPlus, name, c.Theme().Text).Clicked() {
 							a.ignoreApp(app.App)
 						}
 					}
@@ -381,47 +428,75 @@ func (a *app) historySection(c *ui.Context, t *ui.Theme) {
 	})
 }
 
-func (a *app) dataSection(c *ui.Context, t *ui.Theme) {
+func (a *app) dataSection(c *ui.Context) {
 	s := &a.settingsUI
-	ui.Row(c).Gap(8).Children(func() {
-		if ui.Button(c, "Export…").Clicked() {
-			a.exportData()
-		}
-		if ui.Button(c, "Import…").Clicked() {
-			a.importData()
-		}
-	})
-	ui.Row(c).Gap(8).Children(func() {
-		if ui.Button(c, "Open Data Folder").Clicked() {
-			if err := mygo.Shell.OpenPath(a.dataDir); err != nil {
-				s.toast = err.Error()
+	settingsGroup(c, "Backup", func() {
+		settingRow(c, "Export", "Save history and snippets to a file.", "", func() {
+			if ui.Button(c, "Export…").Clicked() {
+				a.exportData()
 			}
-		}
-		if ui.Button(c, "Clear History…").Clicked() {
-			a.confirmClear(a.settingsWin)
-		}
+		})
+		settingRow(c, "Import", "Add entries and snippets from an export file.", "", func() {
+			if ui.Button(c, "Import…").Clicked() {
+				a.importData()
+			}
+		})
 	})
-	ui.Text(c, s.stats).FontSize(12).TextColor(t.TextMuted).Wrap()
+	settingsGroup(c, "Storage", func() {
+		settingRow(c, "Data folder", a.dataDir, "", func() {
+			if ui.Button(c, "Open Folder").Clicked() {
+				if err := mygo.Shell.OpenPath(a.dataDir); err != nil {
+					s.toast = err.Error()
+				}
+			}
+		})
+		settingRow(c, "Usage", s.stats, "", nil)
+	})
+	settingsGroup(c, "Clear history", func() {
+		settingRow(c, "Clear history", "Deletes every unpinned entry. Pinned entries and snippets are kept.", "", func() {
+			if ui.Button(c, "").Label("Clear History…").Children(func() {
+				ui.Text(c, "Clear History…").TextColor(c.Theme().Danger)
+			}).Clicked() {
+				a.confirmClear(a.settingsWin)
+			}
+		})
+	})
 }
 
-func (a *app) aboutSection(c *ui.Context, t *ui.Theme) {
-	ui.Text(c, appName+" "+mygo.App.Version()).Bold().FontSize(16)
-	ui.Text(c, "Data folder: "+a.dataDir).Wrap().Selectable()
-	status := "Tray: OK"
-	if a.trayErr != "" {
-		status = "Tray: " + a.trayErr
-	} else if a.tray == nil {
-		status = "Tray: not started"
-	}
-	ui.Text(c, status).Wrap()
+func (a *app) aboutSection(c *ui.Context) {
+	t := c.Theme()
+	ui.Row(c).Padding(16).Gap(14).AlignItems(ui.Center).Radius(12).Background(t.Text.Alpha(0.04)).Children(func() {
+		ui.Box(c).Size(48, 48).Radius(12).Background(t.Accent.Alpha(0.18)).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+			ui.Icon(c, iconClipboard).Size(26, 26).TextColor(t.Accent)
+		})
+		ui.Column(c).Gap(2).Children(func() {
+			ui.Text(c, appName).Bold().FontSize(16)
+			ui.Text(c, "Version "+mygo.App.Version()).FontSize(12).TextColor(t.TextMuted)
+		})
+	})
+	settingsGroup(c, "Status", func() {
+		v, col := "Running", t.TextMuted
+		if a.trayErr != "" {
+			v, col = a.trayErr, t.Danger
+		} else if a.tray == nil {
+			v = "Not started"
+		}
+		settingRow(c, "Tray icon", "", "", func() {
+			ui.Text(c, v).FontSize(12).TextColor(col)
+		})
+		if a.waylandCapture {
+			settingRow(c, "Clipboard", "", "", func() {
+				ui.Text(c, "wl-paste (Wayland data-control)").FontSize(12).TextColor(t.TextMuted)
+			})
+		}
+		if a.waylandMode == "wayland" && !a.waylandCapture {
+			settingRow(c, "Clipboard", "Copies are recorded only while an "+appName+" window is focused (native Wayland).", "", nil)
+		}
+	})
 	if isDarwin {
-		help(c, t, "If macOS asks, choose Always Allow for "+appName+" (System Settings › Privacy & Security › Paste from Other Apps)")
-	}
-	if a.waylandCapture {
-		help(c, t, "Clipboard: wl-paste (Wayland data-control)")
-	}
-	if a.waylandMode == "wayland" && !a.waylandCapture {
-		help(c, t, "Native Wayland: copies are recorded only while an "+appName+" window is focused.")
+		settingsGroup(c, "Permissions", func() {
+			settingRow(c, "Paste from Other Apps", "If macOS asks, choose Always Allow for "+appName+" (System Settings › Privacy & Security › Paste from Other Apps).", "", nil)
+		})
 	}
 }
 

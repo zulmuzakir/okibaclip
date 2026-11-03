@@ -80,16 +80,20 @@ func (a *app) entryEditModal(c *ui.Context) {
 		return
 	}
 	ui.Modal(c, &a.edit.open, func() {
-		ui.Column(c).Width(440).Padding(16).Gap(10).Children(func() {
+		ui.Column(c).Width(440).Padding(16).Gap(8).Children(func() {
 			title := "Edit Entry"
 			if a.edit.rename {
 				title = "Rename Pinned Entry"
 			}
 			ui.Text(c, title).Bold().FontSize(16)
 			if a.edit.rename {
-				ui.TextInput(c, &a.edit.value).Label("Name").Placeholder("Name (empty shows the text)").Width(408)
+				ui.Field(c, "Name", func() {
+					ui.TextInput(c, &a.edit.value).Label("Name").Placeholder("Name (empty shows the text)").Width(408)
+				})
 			} else {
-				ui.TextArea(c, &a.edit.value).Label("Text").Width(408).Height(200)
+				ui.Field(c, "Text", func() {
+					ui.TextArea(c, &a.edit.value).Label("Text").Width(408).Height(200)
+				})
 			}
 			if a.edit.err != "" {
 				ui.Text(c, a.edit.err).TextColor(t.Danger).FontSize(12)

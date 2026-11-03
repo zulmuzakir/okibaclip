@@ -89,30 +89,31 @@ type app struct {
 	src     capture.Source
 
 	// View state, on the main thread.
-	items         []history.Entry
-	snippets      []history.Snippet
-	query         string
-	shown         search.Query // the query a.items and a.snippets answer, for highlights
-	tab           int
-	chosen        int
-	selected      ui.Selection[int64]
-	list          ui.ListState
-	search        ui.Handle
-	preview       history.Entry
-	previewBitmap *ui.Bitmap
-	previewStats  string // textStats of preview
-	previewCode   bool   // preview's text looksLikeCode
-	syntaxOpen    bool
-	thumbs        map[int64]*ui.Bitmap
-	gen           uint64
-	previewGen    uint64
-	toast         string
-	toastUndo     []history.Entry
-	hint          string
-	footerNote    string
-	snipList      ui.ListState
-	chosenSnippet int
-	editor        struct {
+	items                []history.Entry
+	snippets             []history.Snippet
+	query                string
+	shown                search.Query // the query a.items and a.snippets answer, for highlights
+	tab                  int
+	chosen               int
+	selected             ui.Selection[int64]
+	list                 ui.ListState
+	search               ui.Handle
+	preview              history.Entry
+	previewBitmap        *ui.Bitmap
+	previewStats         string // textStats of preview
+	previewCode          bool   // preview's text looksLikeCode
+	syntaxOpen           bool
+	thumbs               map[int64]*ui.Bitmap
+	gen                  uint64
+	previewGen           uint64
+	toast                string
+	toastUndo            []history.Entry
+	hint                 string
+	footerNote           string
+	snipList             ui.ListState
+	listBase, listThemed ui.Theme // listTheme's cache: the theme it was made from, and its result
+	chosenSnippet        int
+	editor               struct {
 		open             bool
 		id               int64
 		name, body       string

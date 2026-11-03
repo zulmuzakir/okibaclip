@@ -407,26 +407,32 @@ func (a *app) showToast(c *ui.Context) {
 
 func (a *app) banners(c *ui.Context) {
 	t := c.Theme()
-	line := func(msg string, button string, fn func()) {
-		ui.Row(c).Padding(4, 16).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, msg).FontSize(11).TextColor(t.TextMuted).SingleLine().Grow(1)
+	line := func(icon *ui.SVG, tone ui.Color, msg, button string, fn func()) {
+		right := float32(12)
+		if button != "" {
+			right = 6
+		}
+		ui.Row(c).Margin(0, 16, 8, 16).Padding(6, right, 6, 12).Gap(8).AlignItems(ui.Center).
+			Radius(8).Background(tone.Alpha(0.12)).Children(func() {
+			ui.Icon(c, icon).Size(14, 14).TextColor(tone)
+			ui.Text(c, msg).FontSize(12).TextColor(t.Text).SingleLine().Grow(1)
 			if button != "" {
-				ui.Button(c, button).OnClick(fn)
+				pillButton(c, nil, button, tone).OnClick(fn)
 			}
 		})
 	}
 	if a.waylandMode == "wayland" && !a.waylandCapture {
-		line("Native Wayland: copies are recorded only while this window is focused.", "", nil)
+		line(iconInfo, t.Accent, "Native Wayland: copies are recorded only while this window is focused.", "", nil)
 	}
 	if paused, until := a.paused(); paused {
 		msg := "Capture paused until resumed"
 		if !until.IsZero() {
 			msg = "Capture paused until " + until.Format("15:04")
 		}
-		line(msg, "Resume", func() { a.mon.Resume() })
+		line(iconPause, t.Warning, msg, "Resume", func() { a.mon.Resume() })
 	}
 	if a.trayErr != "" {
-		line("Tray icon unavailable: "+a.trayErr, "", nil)
+		line(iconAlert, t.Warning, "Tray icon unavailable: "+a.trayErr, "", nil)
 	}
 }
 
@@ -440,7 +446,7 @@ func (a *app) leading(c *ui.Context, e history.Entry, fg ui.Color) {
 	case history.KindColor:
 		if history.TextKind(e.Text) == history.KindColor {
 			// Imports can carry an invalid color; ui.Hex panics on it.
-			ui.Box(c).Size(28, 28).Radius(6).Background(ui.Hex(strings.TrimSpace(e.Text))).Border(1, c.Theme().Border)
+			ui.Box(c).Size(28, 28).Radius(6).Background(ui.Hex(strings.TrimSpace(e.Text))).Border(1, c.Theme().Text.Alpha(0.12))
 			return
 		}
 	}
@@ -542,25 +548,61 @@ func iconButton(c *ui.Context, icon *ui.SVG, label, tip string, fg ui.Color) ui.
 	return b
 }
 
-// rowStyle paints a list row: the chosen row gets an accent tint and an
-// accent bar on its left edge, other rows of a multi-selection a lighter
-// tint, a hovered row the theme's hover face. It returns the color to
-// highlight search matches with. Row text keeps the theme's Text and
-// TextMuted colors in every state.
-func rowStyle(c *ui.Context, row ui.Element, chosen, selected bool) (hl ui.Color) {
-	t := c.Theme()
-	switch {
-	case chosen:
+// pillButton is a compact rounded button: an optional icon and label in
+// fg on a faint fill of fg, for secondary actions that should weigh less
+// than ui.Button. label also names it for assistive technology and
+// Tester.Click.
+func pillButton(c *ui.Context, icon *ui.SVG, label string, fg ui.Color) ui.Element {
+	b := ui.ButtonBase(c).Label(label).Padding(4, 10).Radius(999).Gap(6).AlignItems(ui.Center)
+	fill := fg.Alpha(0.10)
+	if b.Hovered() {
+		fill = fg.Alpha(0.18)
+	}
+	b.Background(fill).Children(func() {
+		if icon != nil {
+			ui.Icon(c, icon).Size(13, 13).TextColor(fg)
+		}
+		ui.Text(c, label).FontSize(12).FontWeight(600).TextColor(fg).SingleLine()
+	})
+	return b
+}
+
+// chosenTint is the accent alpha of a chosen list row.
+const chosenTint = 0.14
+
+// listTheme is t for the history and snippet lists. mygo's List fills
+// the rows it has chosen with Accent and colors them AccentText (ui
+// node.Selected); here that fill is the soft chosen tint and the text
+// keeps Text, so a chosen row looks the same whether the list or the
+// search field has the focus. Cached: a build copies nothing.
+func (a *app) listTheme(t *ui.Theme) *ui.Theme {
+	if a.listBase != *t {
+		a.listBase, a.listThemed = *t, *t
+		a.listThemed.Accent = t.Accent.Alpha(chosenTint)
+		a.listThemed.AccentText = t.Text
+		a.listThemed.Radius = 10
+	}
+	return &a.listThemed
+}
+
+// rowStyle paints a list row's choice on top of what the list paints
+// (listTheme): the list tints the rows it has chosen (listChosen) and
+// the hovered row. The keys move a.chosen without choosing it in the
+// list, so rowStyle tints the chosen row when the list has not, and
+// draws the accent bar on its left edge. t is the panel's theme, not
+// the list's. It returns the color to highlight search matches with.
+func rowStyle(t *ui.Theme, row ui.Element, chosen, listChosen bool) (hl ui.Color) {
+	if chosen {
+		if !listChosen {
+			row.Background(t.Accent.Alpha(chosenTint))
+		}
 		accent := t.Accent
-		row.Background(t.Accent.Alpha(0.14)).DrawOver(func(p *ui.Painter, r ui.Rect) {
+		row.DrawOver(func(p *ui.Painter, r ui.Rect) {
 			p.Fill(ui.Rect{X: r.X + 2, Y: r.Y + 10, W: 3, H: r.H - 20}, accent, 1.5)
 		})
+	}
+	if chosen || listChosen {
 		return t.Accent.Alpha(0.35)
-	case selected:
-		row.Background(t.Accent.Alpha(0.08))
-		return t.Accent.Alpha(0.35)
-	case row.Hovered():
-		row.Background(t.SurfaceHover)
 	}
 	return t.Accent.Alpha(0.22)
 }
@@ -569,38 +611,44 @@ func rowStyle(c *ui.Context, row ui.Element, chosen, selected bool) (hl ui.Color
 // at the end. It is a tab list: arrows, Home and End move the choice
 // while a chip has the focus.
 func (a *app) filterBar(c *ui.Context) {
-	t := c.Theme()
 	tabs := ui.TabsBase(c, &a.tab, len(tabLabels))
 	tabs.List.FillWidth().Padding(4, 16, 12, 16).Gap(6).AlignItems(ui.Center).Children(func() {
 		for i, label := range tabLabels {
 			if i == tabSnippets {
 				ui.Box(c).Grow(1)
 			}
-			on := i == a.tab
-			chip := tabs.Tab(i).Padding(5, 12).Radius(999).Gap(6).AlignItems(ui.Center)
-			fg := t.TextMuted
-			switch {
-			case on:
-				chip.Background(t.Accent.Alpha(0.18))
-				fg = t.Text
-			case chip.Hovered():
-				chip.Background(t.SurfaceHover)
-				fg = t.Text
-			}
-			chip.Children(func() {
-				if icon := chipIcons[i]; icon != nil {
-					ui.Icon(c, icon).Size(13, 13).TextColor(fg)
-				}
-				txt := ui.Text(c, label).FontSize(12).SingleLine().TextColor(fg)
-				if on {
-					txt.FontWeight(600)
-				}
-			})
+			pillTab(c, tabs.Tab(i), i == a.tab, chipIcons[i], label)
 		}
 	})
 	if tabs.List.Changed() {
 		a.setTab(a.tab)
 	}
+}
+
+// pillTab styles a TabsBase tab as a borderless pill: a soft accent fill
+// and semibold text when on, the hover face when hovered, muted text
+// otherwise. icon may be nil.
+func pillTab(c *ui.Context, chip ui.Element, on bool, icon *ui.SVG, label string) {
+	t := c.Theme()
+	chip.Padding(5, 12).Radius(999).Gap(6).AlignItems(ui.Center)
+	fg := t.TextMuted
+	switch {
+	case on:
+		chip.Background(t.Accent.Alpha(0.18))
+		fg = t.Text
+	case chip.Hovered():
+		chip.Background(t.SurfaceHover)
+		fg = t.Text
+	}
+	chip.Children(func() {
+		if icon != nil {
+			ui.Icon(c, icon).Size(13, 13).TextColor(fg)
+		}
+		txt := ui.Text(c, label).FontSize(12).SingleLine().TextColor(fg)
+		if on {
+			txt.FontWeight(600)
+		}
+	})
 }
 
 // syntaxHelp is the content of the search syntax popover.
@@ -672,6 +720,7 @@ func (a *app) noMatches(c *ui.Context) {
 }
 
 func (a *app) historyList(c *ui.Context) {
+	t := c.Theme()
 	a.list.Label = func(i int) string { return preview(a.items[i]) }
 	a.list.Selected = &a.chosen
 	now := time.Now()
@@ -679,29 +728,31 @@ func (a *app) historyList(c *ui.Context) {
 	if a.tab == tabPinned && a.query == "" {
 		a.list.Reorder = func(rows []int, to int) { a.pending = func() { a.reorderPinned(rows, to) } }
 	}
-	list := ui.List(c.Key("history"), &a.list, len(a.items)).
-		ItemKey(func(i int) any { return a.items[i].ID }).
-		Selection(&a.selected).
-		Grow(1).Padding(6).Children(func() {
-		switch {
-		case len(a.items) > 0:
-		case !a.shown.IsZero():
-			a.noMatches(c)
-		default:
-			e := tabEmpty[a.tab]
-			tips := []string{e.tip}
-			if a.tab == 0 && a.shortcut != "" {
-				tips = append(tips, keys(a.shortcut)+" opens this panel.")
+	ui.Themed(c, a.listTheme(t)).Background(ui.Transparent).Grow(1).Children(func() {
+		list := ui.List(c.Key("history"), &a.list, len(a.items)).
+			ItemKey(func(i int) any { return a.items[i].ID }).
+			Selection(&a.selected).
+			Grow(1).Padding(6).Children(func() {
+			switch {
+			case len(a.items) > 0:
+			case !a.shown.IsZero():
+				a.noMatches(c)
+			default:
+				e := tabEmpty[a.tab]
+				tips := []string{e.tip}
+				if a.tab == 0 && a.shortcut != "" {
+					tips = append(tips, keys(a.shortcut)+" opens this panel.")
+				}
+				emptyState(c, e.icon, e.title, tips...)
 			}
-			emptyState(c, e.icon, e.title, tips...)
+		}).Rows(func(r ui.ListRow) { a.row(r, now, t) })
+		if list.Changed() {
+			a.loadPreview()
 		}
-	}).Rows(func(r ui.ListRow) { a.row(r, now) })
-	if list.Changed() {
-		a.loadPreview()
-	}
-	if list.Submitted() {
-		a.copyChosen(false)
-	}
+		if list.Submitted() {
+			a.copyChosen(false)
+		}
+	})
 	a.runPending()
 }
 
@@ -715,13 +766,12 @@ func (a *app) runPending() {
 
 // row builds one history row; a choice in its context menu is noted in
 // a.pending, to run once the list is built.
-func (a *app) row(r ui.ListRow, now time.Time) {
+func (a *app) row(r ui.ListRow, now time.Time, t *ui.Theme) {
 	c, i := r.Context, r.Index
 	e := a.items[i]
-	t := c.Theme()
 	title, detail := rowLines(e)
 	row := ui.Row(c).Padding(8, 10).Gap(12).AlignItems(ui.Center).Radius(10)
-	hl := rowStyle(c, row, i == a.chosen, r.Selected()) // the keyboard moves a.chosen without filling the selection set
+	hl := rowStyle(t, row, i == a.chosen, r.Selected()) // the keyboard moves a.chosen without filling the selection set
 	text, muted := t.Text, t.TextMuted
 	row.Children(func() {
 		a.leading(c, e, muted)
@@ -866,7 +916,7 @@ func (a *app) previewPane(c *ui.Context) {
 				for _, p := range strings.Split(e.Text, "\n") {
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 						a.highlighted(c, p, hl).Wrap().Grow(1).Selectable()
-						ui.Button(c, "Show in Folder").OnClick(func() { showInFolder(p) })
+						pillButton(c, iconFolder, "Show in Folder", t.Text).OnClick(func() { showInFolder(p) })
 					})
 				}
 			case history.KindColor:
@@ -877,7 +927,7 @@ func (a *app) previewPane(c *ui.Context) {
 				}
 				col := ui.Hex(strings.TrimSpace(e.Text))
 				hex, rgb := colorValues(col)
-				ui.Box(c).FillWidth().Height(120).Radius(10).Background(col).Border(1, t.Border)
+				ui.Box(c).FillWidth().Height(120).Radius(10).Background(col).Border(1, t.Text.Alpha(0.12))
 				ui.Text(c, hex).Font("monospace").FontSize(13).Selectable()
 				ui.Text(c, rgb).Font("monospace").FontSize(13).Selectable()
 			default:
@@ -907,7 +957,11 @@ func (a *app) textBody(c *ui.Context, e history.Entry, hl ui.Color) {
 		h.Font("monospace").FontSize(12)
 	}
 	h.Wrap().Selectable()
-	if e.Kind == history.KindLink && ui.Button(c, "Open Link").Clicked() {
-		openLink(strings.TrimSpace(e.Text))
+	if e.Kind == history.KindLink {
+		ui.Row(c).Children(func() {
+			if pillButton(c, iconExternal, "Open Link", c.Theme().Accent).Clicked() {
+				openLink(strings.TrimSpace(e.Text))
+			}
+		})
 	}
 }
