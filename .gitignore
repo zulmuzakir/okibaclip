@@ -4,3 +4,11 @@ mygo_windows_*.syso
 /my-clipboard
 /my-clipboard.exe
 .DS_Store
+*.test
+*.out
+.idea/
+.vscode/
+*.swp
+.env
+.env.*
+mygo-update.key
