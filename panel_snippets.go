@@ -20,12 +20,17 @@ func (a *app) snippetList(c *ui.Context) {
 		case len(a.shown.Terms) > 0:
 			a.noMatches(c)
 		default:
-			emptyState(c, iconSnippet, "No snippets yet", "Save text you reuse: New Snippet below, "+cmdSym()+"N, or Save as Snippet… on a history entry.")
+			emptyState(c, iconSnippet, "No snippets yet", "Press "+cmdSym()+"N to create one, or right-click a history entry and choose Save as Snippet…")
+			ui.Column(c).FillWidth().AlignItems(ui.Center).Children(func() {
+				if ui.PrimaryButton(c, "Create Snippet").Clicked() {
+					a.newSnippet("", "")
+				}
+			})
 		}
 	}).Rows(func(r ui.ListRow) {
 		c, i := r.Context, r.Index
 		s := a.snippets[i]
-		row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8)
+		row := ui.Row(c).Padding(8, 10).Gap(12).AlignItems(ui.Center).Radius(10)
 		hl := rowStyle(c, row, i == a.chosenSnippet, r.Selected())
 		text, muted := t.Text, t.TextMuted
 		row.Children(func() {
@@ -58,11 +63,6 @@ func (a *app) snippetList(c *ui.Context) {
 		a.copyChosen(false)
 	}
 	a.runPending()
-	ui.Row(c).Padding(8).Children(func() {
-		if ui.Button(c, "New Snippet").Grow(1).Clicked() {
-			a.newSnippet("", "")
-		}
-	})
 }
 
 func (a *app) snippetPreview(c *ui.Context) {

@@ -272,6 +272,11 @@ func (a *app) view(c *ui.Context) {
 			if count := a.resultCount(); count != "" {
 				ui.Text(c, count).FontSize(12).TextColor(t.TextMuted)
 			}
+			if a.tab == tabSnippets && len(a.snippets) > 0 {
+				if iconButton(c, iconPlus, "Add Snippet", "New Snippet ("+cmdSym()+"N)", t.TextMuted).Clicked() {
+					a.newSnippet("", "")
+				}
+			}
 			help := iconButton(c, iconInfo, "Search syntax", "Search syntax", t.TextMuted)
 			if help.Clicked() {
 				a.syntaxOpen = !a.syntaxOpen
@@ -285,17 +290,28 @@ func (a *app) view(c *ui.Context) {
 		})
 		a.filterBar(c)
 		a.banners(c)
-		ui.Divider(c)
+		empty := len(a.items) == 0
+		if a.tab == tabSnippets {
+			empty = len(a.snippets) == 0
+		}
 		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Children(func() {
-			ui.Column(c).Width(340).Children(func() {
+			list := ui.Column(c)
+			if empty {
+				list.Grow(1)
+			} else {
+				list.Width(340).Padding(0, 0, 0, 4)
+			}
+			list.Children(func() {
 				if a.tab == tabSnippets {
 					a.snippetList(c)
 				} else {
 					a.historyList(c)
 				}
 			})
-			ui.Box(c).Width(1).Background(t.Border)
-			ui.Column(c).Grow(1).Padding(12).Gap(8).Children(func() {
+			if empty {
+				return
+			}
+			ui.Column(c).Grow(1).Margin(0, 12, 12, 4).Padding(14).Gap(10).Radius(12).Background(t.Text.Alpha(0.04)).Children(func() {
 				if a.tab == tabSnippets {
 					a.snippetPreview(c)
 				} else {
@@ -303,8 +319,7 @@ func (a *app) view(c *ui.Context) {
 				}
 			})
 		})
-		ui.Divider(c)
-		ui.Row(c).Padding(8, 16).Gap(12).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Padding(8, 16).Gap(12).AlignItems(ui.Center).Background(t.Text.Alpha(0.03)).Children(func() {
 			ui.RichText(c, a.hintSpans(t)...).FontSize(11).SingleLine().Grow(1)
 			if s := a.footerStatus(); s != "" {
 				ui.Text(c, s).FontSize(11).TextColor(t.TextMuted).SingleLine()
@@ -476,12 +491,14 @@ func (a *app) highlighted(c *ui.Context, s string, hl ui.Color) ui.Element {
 // emptyState fills an empty list with an icon, a title and tips.
 func emptyState(c *ui.Context, icon *ui.SVG, title string, tips ...string) {
 	t := c.Theme()
-	ui.Column(c).Padding(24, 16).Gap(6).AlignItems(ui.Center).Children(func() {
-		ui.Icon(c, icon).FontSize(28).TextColor(t.TextMuted)
-		ui.Text(c, title).Bold().Wrap().TextAlign(ui.Center)
-		for _, tip := range tips {
-			ui.Text(c, tip).FontSize(11).TextColor(t.TextMuted).Wrap().TextAlign(ui.Center)
-		}
+	ui.Column(c).Padding(48, 24).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Icon(c, icon).FontSize(32).TextColor(t.TextMuted)
+		ui.Text(c, title).Bold().FontSize(15).Wrap().TextAlign(ui.Center)
+		ui.Column(c).Width(380).Gap(4).AlignItems(ui.Center).Children(func() {
+			for _, tip := range tips {
+				ui.Text(c, tip).FontSize(11).TextColor(t.TextMuted).Wrap().TextAlign(ui.Center)
+			}
+		})
 	})
 }
 
@@ -535,12 +552,12 @@ func rowStyle(c *ui.Context, row ui.Element, chosen, selected bool) (hl ui.Color
 	switch {
 	case chosen:
 		accent := t.Accent
-		row.Background(t.Accent.Alpha(0.16)).DrawOver(func(p *ui.Painter, r ui.Rect) {
-			p.Fill(ui.Rect{X: r.X, Y: r.Y + 8, W: 3, H: r.H - 16}, accent, 1.5)
+		row.Background(t.Accent.Alpha(0.14)).DrawOver(func(p *ui.Painter, r ui.Rect) {
+			p.Fill(ui.Rect{X: r.X + 2, Y: r.Y + 10, W: 3, H: r.H - 20}, accent, 1.5)
 		})
 		return t.Accent.Alpha(0.35)
 	case selected:
-		row.Background(t.Accent.Alpha(0.10))
+		row.Background(t.Accent.Alpha(0.08))
 		return t.Accent.Alpha(0.35)
 	case row.Hovered():
 		row.Background(t.SurfaceHover)
@@ -554,17 +571,17 @@ func rowStyle(c *ui.Context, row ui.Element, chosen, selected bool) (hl ui.Color
 func (a *app) filterBar(c *ui.Context) {
 	t := c.Theme()
 	tabs := ui.TabsBase(c, &a.tab, len(tabLabels))
-	tabs.List.FillWidth().Padding(2, 16, 10, 16).Gap(6).AlignItems(ui.Center).Children(func() {
+	tabs.List.FillWidth().Padding(4, 16, 12, 16).Gap(6).AlignItems(ui.Center).Children(func() {
 		for i, label := range tabLabels {
 			if i == tabSnippets {
 				ui.Box(c).Grow(1)
 			}
 			on := i == a.tab
-			chip := tabs.Tab(i).Padding(3, 10).Radius(999).Gap(5).AlignItems(ui.Center).Border(1, t.Border)
+			chip := tabs.Tab(i).Padding(5, 12).Radius(999).Gap(6).AlignItems(ui.Center)
 			fg := t.TextMuted
 			switch {
 			case on:
-				chip.Background(t.Accent.Alpha(0.16)).BorderColor(t.Accent.Alpha(0.6))
+				chip.Background(t.Accent.Alpha(0.18))
 				fg = t.Text
 			case chip.Hovered():
 				chip.Background(t.SurfaceHover)
@@ -621,7 +638,7 @@ func (a *app) hintSpans(t *ui.Theme) []ui.Span {
 			action += "    "
 		}
 		spans = append(spans,
-			ui.Span{Text: " " + p[0] + " ", Size: 10, Weight: 600, Color: t.Text, Background: t.Text.Alpha(0.08), Radius: 4},
+			ui.Span{Text: " " + p[0] + " ", Size: 10, Weight: 600, Color: t.Text, Background: t.Text.Alpha(0.10), Radius: 5},
 			ui.Span{Text: action, Color: t.TextMuted})
 	}
 	return spans
@@ -634,8 +651,6 @@ func (a *app) footerStatus() string {
 		return fmt.Sprintf("%d selected", a.selected.Len())
 	case a.footerNote != "":
 		return a.footerNote
-	case a.shortcut != "":
-		return keys(a.shortcut) + " to show"
 	}
 	return ""
 }
@@ -705,7 +720,7 @@ func (a *app) row(r ui.ListRow, now time.Time) {
 	e := a.items[i]
 	t := c.Theme()
 	title, detail := rowLines(e)
-	row := ui.Row(c).Padding(6, 10).Gap(10).AlignItems(ui.Center).Radius(8)
+	row := ui.Row(c).Padding(8, 10).Gap(12).AlignItems(ui.Center).Radius(10)
 	hl := rowStyle(c, row, i == a.chosen, r.Selected()) // the keyboard moves a.chosen without filling the selection set
 	text, muted := t.Text, t.TextMuted
 	row.Children(func() {
@@ -837,7 +852,6 @@ func (a *app) previewPane(c *ui.Context) {
 		iconButton(c, iconMore, "More actions", "More actions", t.TextMuted).Menu(func(m *ui.Menu) { a.entryMenu(m, e) })
 		ui.PrimaryButton(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copyEntry(e, false) })
 	})
-	ui.Divider(c)
 	hl := t.Accent.Alpha(0.22)
 	ui.Scroll(c).Grow(1).Children(func() {
 		ui.Column(c).Gap(8).Children(func() {
