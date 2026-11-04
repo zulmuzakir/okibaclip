@@ -80,7 +80,7 @@ func (a *app) entryEditModal(c *ui.Context) {
 		return
 	}
 	ui.Modal(c, &a.edit.open, func() {
-		ui.Column(c).Width(440).Padding(16).Gap(8).Children(func() {
+		ui.Themed(c, a.fieldTheme(t)).Background(ui.Transparent).Width(440).Padding(16).Gap(8).Children(func() {
 			title := "Edit Entry"
 			if a.edit.rename {
 				title = "Rename Pinned Entry"
@@ -99,10 +99,10 @@ func (a *app) entryEditModal(c *ui.Context) {
 				ui.Text(c, a.edit.err).TextColor(t.Danger).FontSize(12)
 			}
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
-				if ui.Button(c, "Cancel").Clicked() {
+				if softButton(c, "Cancel", t.Text).Clicked() {
 					a.edit.open, a.edit.err = false, ""
 				}
-				if ui.Button(c, "Save").Clicked() {
+				if softButton(c, "Save", t.Text).Clicked() {
 					a.saveEntryEdit(false)
 				}
 				if !a.edit.rename && ui.PrimaryButton(c, "Save & Copy").Clicked() {

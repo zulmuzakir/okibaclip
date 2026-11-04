@@ -567,6 +567,21 @@ func pillButton(c *ui.Context, icon *ui.SVG, label string, fg ui.Color) ui.Eleme
 	return b
 }
 
+// softButton is a borderless button sized like ui.Button: label in fg on
+// a faint fill of fg, for secondary actions beside ui.PrimaryButton and
+// in settings rows. label also names it for assistive technology and
+// Tester.Click.
+func softButton(c *ui.Context, label string, fg ui.Color) ui.Element {
+	t := c.Theme()
+	b := ui.ButtonBase(c).Label(label).Padding(t.Space(1.5), t.Space(3.5)).Radius(t.Radius)
+	fill := fg.Alpha(0.08)
+	if b.Hovered() {
+		fill = fg.Alpha(0.14)
+	}
+	b.Background(fill).Children(func() { ui.Text(c, label).TextColor(fg).SingleLine() })
+	return b
+}
+
 // chosenTint is the accent alpha of a chosen list row.
 const chosenTint = 0.14
 
@@ -583,6 +598,17 @@ func (a *app) listTheme(t *ui.Theme) *ui.Theme {
 		a.listThemed.Radius = 10
 	}
 	return &a.listThemed
+}
+
+// fieldTheme is t for the editor modals: inputs filled with the modal's
+// Background instead of Surface, so they read as outlined fields, as on
+// the settings cards. Cached: a build copies nothing.
+func (a *app) fieldTheme(t *ui.Theme) *ui.Theme {
+	if a.fieldBase != *t {
+		a.fieldBase, a.fieldThemed = *t, *t
+		a.fieldThemed.Surface = t.Background
+	}
+	return &a.fieldThemed
 }
 
 // rowStyle paints a list row's choice on top of what the list paints

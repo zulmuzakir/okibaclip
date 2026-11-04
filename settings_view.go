@@ -307,10 +307,10 @@ func (a *app) generalSection(c *ui.Context) {
 		settingBlock(c, "Global shortcut", "Format: CmdOrCtrl+Shift+V. Modifiers: CmdOrCtrl, Cmd, Ctrl, Alt, Shift, Super.", shortErr, func() {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 				ui.TextInput(c, &s.shortcut).Label("Global shortcut").Grow(1)
-				if ui.Button(c, "Apply").Clicked() {
+				if softButton(c, "Apply", c.Theme().Text).Clicked() {
 					a.saveShortcut(s.shortcut)
 				}
-				if ui.Button(c, "Reset").Clicked() {
+				if softButton(c, "Reset", c.Theme().Text).Clicked() {
 					a.saveShortcut("")
 				}
 			})
@@ -319,7 +319,7 @@ func (a *app) generalSection(c *ui.Context) {
 			settingBlock(c, "Desktop shortcut", "On Wayland desktops global shortcuts may not reach the app. Add a custom shortcut in your desktop settings that runs this command.", "", func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, s.toggleCmd).Font("monospace").FontSize(12).Wrap().Selectable().Grow(1).MinWidth(0)
-					if ui.Button(c, "Copy Command").Clicked() {
+					if softButton(c, "Copy Command", c.Theme().Text).Clicked() {
 						cmd := s.toggleCmd
 						if err := a.write(textHash(cmd), textData(cmd, "")); err != nil {
 							c.Toast("Copy failed: " + err.Error())
@@ -347,7 +347,7 @@ func (a *app) generalSection(c *ui.Context) {
 		})
 		if isDarwin && s.form.PasteAfterCopy && !a.paster.Trusted(false) {
 			settingRow(c, "Accessibility access", "", "Allow "+appName+" in System Settings › Privacy & Security › Accessibility", func() {
-				if ui.Button(c, "Open Settings").Clicked() {
+				if softButton(c, "Open Settings", c.Theme().Text).Clicked() {
 					if err := mygo.Shell.OpenExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"); err != nil {
 						s.toast = err.Error()
 					}
@@ -432,19 +432,19 @@ func (a *app) dataSection(c *ui.Context) {
 	s := &a.settingsUI
 	settingsGroup(c, "Backup", func() {
 		settingRow(c, "Export", "Save history and snippets to a file.", "", func() {
-			if ui.Button(c, "Export…").Clicked() {
+			if softButton(c, "Export…", c.Theme().Text).Clicked() {
 				a.exportData()
 			}
 		})
 		settingRow(c, "Import", "Add entries and snippets from an export file.", "", func() {
-			if ui.Button(c, "Import…").Clicked() {
+			if softButton(c, "Import…", c.Theme().Text).Clicked() {
 				a.importData()
 			}
 		})
 	})
 	settingsGroup(c, "Storage", func() {
 		settingRow(c, "Data folder", a.dataDir, "", func() {
-			if ui.Button(c, "Open Folder").Clicked() {
+			if softButton(c, "Open Folder", c.Theme().Text).Clicked() {
 				if err := mygo.Shell.OpenPath(a.dataDir); err != nil {
 					s.toast = err.Error()
 				}
@@ -454,9 +454,7 @@ func (a *app) dataSection(c *ui.Context) {
 	})
 	settingsGroup(c, "Clear history", func() {
 		settingRow(c, "Clear history", "Deletes every unpinned entry. Pinned entries and snippets are kept.", "", func() {
-			if ui.Button(c, "").Label("Clear History…").Children(func() {
-				ui.Text(c, "Clear History…").TextColor(c.Theme().Danger)
-			}).Clicked() {
+			if softButton(c, "Clear History…", c.Theme().Danger).Clicked() {
 				a.confirmClear(a.settingsWin)
 			}
 		})

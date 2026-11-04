@@ -123,7 +123,7 @@ func (a *app) editorModal(c *ui.Context) {
 		return
 	}
 	ui.Modal(c, &a.editor.open, func() {
-		ui.Column(c).Width(440).Padding(16).Gap(8).Children(func() {
+		ui.Themed(c, a.fieldTheme(t)).Background(ui.Transparent).Width(440).Padding(16).Gap(8).Children(func() {
 			title := "New Snippet"
 			if a.editor.id != 0 {
 				title = "Edit Snippet"
@@ -147,7 +147,7 @@ func (a *app) editorModal(c *ui.Context) {
 				ui.Text(c, a.editor.err).TextColor(t.Danger).FontSize(12)
 			}
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
-				if ui.Button(c, "Cancel").Clicked() {
+				if softButton(c, "Cancel", t.Text).Clicked() {
 					a.editor.open, a.editor.err = false, ""
 				}
 				if ui.PrimaryButton(c, "Save").Clicked() {
