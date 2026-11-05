@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,9 @@ import (
 )
 
 func TestRowLines(t *testing.T) {
+	// Native paths: filepath.Dir gives \home\u for /home/u/a.txt on Windows.
+	dir := filepath.Join(string(filepath.Separator)+"home", "u")
+	files := filepath.Join(dir, "a.txt") + "\n" + filepath.Join(dir, "b.txt")
 	for _, tc := range []struct {
 		e             history.Entry
 		title, detail string
@@ -23,7 +27,7 @@ func TestRowLines(t *testing.T) {
 		{history.Entry{Kind: history.KindLink, Text: " https://github.com/x?y=1 "}, "https://github.com/x?y=1", "Link · github.com"},
 		{history.Entry{Kind: history.KindColor, Text: "#ff8800"}, "#ff8800", "Color"},
 		{history.Entry{Kind: history.KindImage, Width: 1920, Height: 1080, Size: 2048}, "Image", "1920×1080 · 2.0 KB"},
-		{history.Entry{Kind: history.KindFiles, Text: "/home/u/a.txt\n/home/u/b.txt"}, "a.txt +1 more", "/home/u"},
+		{history.Entry{Kind: history.KindFiles, Text: files}, "a.txt +1 more", dir},
 		{history.Entry{Kind: history.KindText, Text: "x", Size: 2048, UseCount: 3}, "x", "Text · used 3× · 2.0 KB"},
 	} {
 		if title, detail := rowLines(tc.e); title != tc.title || detail != tc.detail {

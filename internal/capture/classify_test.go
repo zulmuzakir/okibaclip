@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -21,7 +22,10 @@ func richData(reps ...transfer.Representation) transfer.Data {
 
 func TestClassify(t *testing.T) {
 	img := historytest.PNG(t, 4, 3)
-	files, _ := transfer.FileData("/tmp/a.txt", "/tmp/b.txt")
+	// FileData takes absolute paths, which on Windows have a drive letter.
+	dir := t.TempDir()
+	fileA, fileB := filepath.Join(dir, "a.txt"), filepath.Join(dir, "b.txt")
+	files, _ := transfer.FileData(fileA, fileB)
 	filesAndText := transfer.New(append(files.Items(), transfer.NewItem(transfer.Bytes(transfer.Text, []byte("x"))))...)
 	textRep := func(s string) transfer.Representation { return transfer.Bytes(transfer.Text, []byte(s)) }
 	def := settings.Default()
@@ -92,7 +96,7 @@ func TestClassify(t *testing.T) {
 		t.Errorf("dims = %dx%d", got.Width, got.Height)
 	}
 	got, _, _ = Classify(files, files.Formats(), def, nil)
-	if got.Text != "/tmp/a.txt\n/tmp/b.txt" {
+	if got.Text != fileA+"\n"+fileB {
 		t.Errorf("files text = %q", got.Text)
 	}
 }
@@ -154,7 +158,7 @@ func TestClassifyAcceptsPixelBoundary(t *testing.T) {
 }
 
 func TestClassifySkipsNonUTF8FilePaths(t *testing.T) {
-	d, err := transfer.FileData("/tmp/caf\xe9.txt")
+	d, err := transfer.FileData(filepath.Join(t.TempDir(), "caf\xe9.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
