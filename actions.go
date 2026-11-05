@@ -74,7 +74,7 @@ func (a *app) setPinned(id int64, pinned bool) {
 // confirmClear asks, then clears history except pinned entries.
 func (a *app) confirmClear(parent *mygo.Window) {
 	a.async(func() {
-		res, err := mygo.Dialog.Message(mygo.MessageOptions{
+		res, err := a.messageDialog(mygo.MessageOptions{
 			Parent: parent, Type: mygo.MessageWarning, Title: "Clear History",
 			Message:            "Clear clipboard history?",
 			Detail:             "Pinned entries and snippets are kept.",
@@ -95,6 +95,14 @@ func (a *app) confirmClear(parent *mygo.Window) {
 		}
 		a.post(a.changed)
 	})
+}
+
+// clearFromPanel hides the panel, then asks to clear history. The panel
+// hides on blur anyway once the dialog takes focus (app.go OnBlur), so the
+// dialog is unparented, as from the tray.
+func (a *app) clearFromPanel() {
+	a.hide()
+	a.confirmClear(nil)
 }
 
 // selectedIDs returns the ids to act on: the multi-selection in list order,

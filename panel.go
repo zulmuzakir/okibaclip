@@ -64,6 +64,15 @@ func (a *app) view(c *ui.Context) {
 			if ui.Popover(c, help, &a.syntaxOpen, func() { a.syntaxHelp(c) }).Dismissed() {
 				a.search.Focus()
 			}
+			iconButton(c, iconSettings, "Options", "Options", t.TextMuted).Menu(func(m *ui.Menu) {
+				if m.Item("Settings…").Shortcut(ui.Cmd, ui.KeyComma).Chosen() {
+					a.openSettings()
+				}
+				m.Separator()
+				if m.Item("Clear History…").Chosen() {
+					a.clearFromPanel()
+				}
+			})
 		})
 		a.filterBar(c)
 		a.banners(c)

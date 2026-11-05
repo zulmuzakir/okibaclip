@@ -95,6 +95,7 @@ func newPanelFixture(t *testing.T, items ...string) *panelFixture {
 	a.fileIcon = func(string, int) ([]byte, error) { return nil, errors.New("no icon") }
 	a.saveDialog = func(mygo.SaveDialogOptions) (string, error) { return "", nil }
 	a.openDialog = func(mygo.OpenDialogOptions) ([]string, error) { return nil, nil }
+	a.messageDialog = func(mygo.MessageOptions) (mygo.MessageResult, error) { return mygo.MessageResult{Button: 1}, nil }
 	f.a = a
 	for i, s := range items {
 		historytest.Add(t, a.store, history.Capture{Kind: history.KindText, Text: s}, historytest.T0.Add(time.Duration(i)*time.Second))
@@ -116,6 +117,49 @@ func (f *panelFixture) written(t *testing.T) []string {
 		out = append(out, string(b))
 	}
 	return out
+}
+
+func TestPanelOptionsMenuClearHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		button int
+		want   []string
+	}{
+		{"confirm", 0, []string{"keep"}},
+		{"cancel", 1, []string{"keep", "drop two", "drop one"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPanelFixture(t, "keep", "drop one", "drop two")
+			for _, e := range f.a.items {
+				if e.Text == "keep" {
+					if err := f.a.store.SetPinned(context.Background(), e.ID, true); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			f.a.reload()
+			f.tt.Frame()
+			var calls []mygo.MessageOptions
+			f.a.messageDialog = func(o mygo.MessageOptions) (mygo.MessageResult, error) {
+				calls = append(calls, o)
+				return mygo.MessageResult{Button: tc.button}, nil
+			}
+			if err := f.tt.Click("Options"); err != nil {
+				t.Fatalf("%v: %q", err, f.tt.Texts())
+			}
+			if err := f.tt.ChooseMenuItem("Clear History…"); err != nil {
+				t.Fatalf("%v: %q", err, f.tt.Texts())
+			}
+			f.tt.Frame()
+			if len(calls) != 1 || calls[0].Title != "Clear History" {
+				t.Fatalf("dialog calls: %+v", calls)
+			}
+			f.a.reload()
+			if got := historytest.Texts(f.a.items); !slices.Equal(got, tc.want) {
+				t.Errorf("items = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestPanelTypingFiltersRows(t *testing.T) {

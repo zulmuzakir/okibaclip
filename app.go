@@ -181,23 +181,25 @@ type app struct {
 	fileIcon       func(path string, size int) ([]byte, error)
 	saveDialog     func(mygo.SaveDialogOptions) (string, error)
 	openDialog     func(mygo.OpenDialogOptions) ([]string, error)
+	messageDialog  func(mygo.MessageOptions) (mygo.MessageResult, error)
 
 	settingsUI settingsState
 }
 
 func newApp() *app {
 	a := &app{
-		ctx:        context.Background(),
-		thumbs:     map[int64]*ui.Bitmap{},
-		appIcons:   map[string]*ui.Bitmap{},
-		snipKeys:   map[string]snipHotkey{},
-		src:        capture.SystemClipboard{},
-		hotkeys:    mygo.GlobalShortcut,
-		paster:     paste.System{},
-		fileIcon:   mygo.Shell.FileIcon,
-		saveDialog: mygo.Dialog.Save,
-		openDialog: mygo.Dialog.Open,
-		cfg:        settings.Default(),
+		ctx:           context.Background(),
+		thumbs:        map[int64]*ui.Bitmap{},
+		appIcons:      map[string]*ui.Bitmap{},
+		snipKeys:      map[string]snipHotkey{},
+		src:           capture.SystemClipboard{},
+		hotkeys:       mygo.GlobalShortcut,
+		paster:        paste.System{},
+		fileIcon:      mygo.Shell.FileIcon,
+		saveDialog:    mygo.Dialog.Save,
+		openDialog:    mygo.Dialog.Open,
+		messageDialog: mygo.Dialog.Message,
+		cfg:           settings.Default(),
 	}
 	a.panelHidden = a.panelHiddenNow
 	a.async = func(fn func()) {
