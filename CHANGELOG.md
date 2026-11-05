@@ -3,7 +3,7 @@
 Each version needs a `## <version>` section: `mygo build` puts it in the
 update manifests, and the update window shows it as the release notes.
 
-## Unreleased
+## 0.3.0
 
 - New Okiba Clip logo: a clipboard with a plum clip, as the app icon, the
   tray icon (which follows the Windows taskbar's light or dark color) and
