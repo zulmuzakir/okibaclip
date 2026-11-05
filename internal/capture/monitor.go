@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
@@ -45,6 +46,11 @@ type Monitor struct {
 	onChange func()
 	now      func() time.Time
 
+	// OnPrune, if set before Run, is called after a prune removed entries,
+	// from the poll goroutine or the hourly prune goroutine; it must be safe
+	// to call concurrently.
+	OnPrune func()
+
 	// baseline, touched only by the Run goroutine (or tests calling tick).
 	lastToken uint64
 	haveToken bool
@@ -55,6 +61,7 @@ type Monitor struct {
 	wasPaused bool
 
 	captureFails int    // consecutive failed attempts at the pending change
+	failedReal   bool   // some failed attempt was a read or store error, not an empty clipboard
 	lastHash     string // hash of the last capture stored or suppressed (Run goroutine only)
 }
 
@@ -201,6 +208,9 @@ func (m *Monitor) prune(ctx context.Context) {
 	if err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
 	} else if n > 0 {
+		if m.OnPrune != nil {
+			m.OnPrune()
+		}
 		m.onChange()
 	}
 }
@@ -246,12 +256,19 @@ func (m *Monitor) baseline(tok uint64, haveTok bool, formats []transfer.Format) 
 	m.lastPrint = m.fingerprint(formats)
 }
 
-// retryPending records one failed attempt at the pending change. After
-// maxCaptureTries it gives up on the change by calling update.
-func (m *Monitor) retryPending(update func()) {
+// retryPending records one failed attempt at the pending change; empty says
+// the clipboard offered no formats (an owner still rendering, or nothing
+// copied yet). After maxCaptureTries it gives up on the change by calling
+// update, logging a warning only if a real read or store error was involved.
+func (m *Monitor) retryPending(update func(), empty bool) {
 	m.captureFails++
+	m.failedReal = m.failedReal || !empty
 	if m.captureFails >= maxCaptureTries {
-		slog.Warn("clipboard change abandoned", "fails", m.captureFails)
+		if m.failedReal {
+			slog.Warn("clipboard change abandoned", "fails", m.captureFails)
+		} else {
+			slog.Debug("clipboard empty", "fails", m.captureFails)
+		}
 		update()
 	}
 }
@@ -291,7 +308,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	m.started = true
 	// update marks the change as seen.
 	update := func() {
-		m.captureFails = 0
+		m.captureFails, m.failedReal = 0, false
 		if haveTok {
 			m.lastToken, m.haveToken = tok, true
 		} else {
@@ -299,7 +316,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		}
 	}
 	if len(formats) == 0 {
-		m.retryPending(update)
+		m.retryPending(update, true)
 		return
 	}
 	owners := m.src.Owners()
@@ -345,7 +362,7 @@ func (m *Monitor) tick(ctx context.Context) {
 			return // retry on the next tick
 		}
 		slog.Error("clipboard read", "err", err)
-		m.retryPending(update)
+		m.retryPending(update, false)
 		return
 	}
 	if haveTok {
@@ -362,7 +379,12 @@ func (m *Monitor) tick(ctx context.Context) {
 		}
 		return
 	}
-	c.SourceApp, c.SourceName, c.SourcePath = owner.App, owner.Name, owner.Path
+	// The store rejects text that is not valid UTF-8, and X11 window classes are Latin-1.
+	c.SourceApp = strings.ToValidUTF8(owner.App, "\uFFFD")
+	c.SourceName = strings.ToValidUTF8(owner.Name, "\uFFFD")
+	if utf8.ValidString(owner.Path) { // a filesystem path: never rewritten
+		c.SourcePath = owner.Path
+	}
 	h := c.Hash()
 	if m.takeSuppressed(h) {
 		m.lastHash = h
@@ -392,13 +414,17 @@ func (m *Monitor) tick(ctx context.Context) {
 		if ctx.Err() == nil {
 			slog.Error("store capture", "err", err)
 		}
-		m.retryPending(update)
+		m.retryPending(update, false)
 		return // not marked seen: the next tick retries
 	}
 	m.lastHash = h
 	update()
-	if _, err := m.store.Prune(ctx, cfg.Settings.Limits(), m.now()); err != nil && ctx.Err() == nil {
+	n, err := m.store.Prune(ctx, cfg.Settings.Limits(), m.now())
+	if err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
+	}
+	if n > 0 && m.OnPrune != nil {
+		m.OnPrune()
 	}
 	m.onChange()
 }

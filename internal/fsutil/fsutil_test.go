@@ -90,3 +90,50 @@ func TestQuarantineMovesCorruptFile(t *testing.T) {
 		t.Errorf("original still present: %v", err)
 	}
 }
+
+func TestQuarantineDoesNotOverwrite(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "history.db")
+	now := time.Date(2026, 11, 5, 14, 30, 12, 0, time.UTC)
+	var got []string
+	for _, content := range []string{"first", "second"} {
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bad, err := Quarantine(p, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, bad)
+	}
+	if got[0] == got[1] || filepath.Base(got[1]) != "history.db.bad-20261105-143012-1" {
+		t.Fatalf("quarantine paths = %q", got)
+	}
+	for i, want := range []string{"first", "second"} {
+		if b, err := os.ReadFile(got[i]); err != nil || string(b) != want {
+			t.Errorf("%s = %q, %v; want %q", got[i], b, err, want)
+		}
+	}
+}
+
+func TestRemoveQuarantinedRemovesOnlyItsCopies(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"history.db", "history.db.bad-20261105-143012", "history.db.bad-20261105-143012-journal", "settings.json.bad-20261105-143012"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RemoveQuarantined(filepath.Join(dir, "history.db")); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != "history.db" || names[1] != "settings.json.bad-20261105-143012" {
+		t.Errorf("left %v", names)
+	}
+	if err := RemoveQuarantined(filepath.Join(dir, "missing", "history.db")); err != nil {
+		t.Errorf("missing folder: %v", err)
+	}
+}

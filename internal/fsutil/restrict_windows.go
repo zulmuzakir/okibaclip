@@ -41,3 +41,7 @@ func Restrict(path string) error {
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
+
+// syncDir does nothing on Windows: NTFS journals the metadata of a rename and
+// Go cannot fsync a directory handle there.
+func syncDir(string) error { return nil }

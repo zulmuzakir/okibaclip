@@ -283,7 +283,7 @@ func (a *app) saveAsSnippet(e history.Entry) {
 }
 
 func (a *app) saveEditor() {
-	name := firstRunes(strings.TrimSpace(a.editor.name), 100)
+	name := firstRunes(strings.TrimSpace(a.editor.name), history.MaxSnippetNameRunes)
 	switch {
 	case name == "":
 		a.editor.err = "Name is required"
@@ -311,7 +311,7 @@ func (a *app) saveEditor() {
 			return
 		}
 	}
-	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body, Folder: firstRunes(strings.TrimSpace(a.editor.folder), 100), Shortcut: acc}
+	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body, Folder: firstRunes(strings.TrimSpace(a.editor.folder), history.MaxSnippetFolderRunes), Shortcut: acc}
 	if a.editor.saving {
 		return
 	}

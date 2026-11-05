@@ -360,6 +360,8 @@ func (im *importer) entry(ctx context.Context, e ExportEntry) error {
 	if (e.Kind == KindImage) != (len(e.Image) > 0) {
 		return nil
 	}
+	e.SourceApp = cutRunes(e.SourceApp, MaxSourceRunes)
+	e.SourceName = cutRunes(e.SourceName, MaxSourceRunes)
 	switch e.Kind {
 	case KindText, KindLink, KindColor:
 		e.Kind = TextKind(e.Text)
@@ -459,7 +461,8 @@ func (im *importer) snippet(ctx context.Context, sn ExportSnippet) error {
 		}
 		return t
 	}
-	sn.Name = strings.TrimSpace(sn.Name)
+	sn.Name = cutRunes(strings.TrimSpace(sn.Name), MaxSnippetNameRunes)
+	sn.Folder = cutRunes(strings.TrimSpace(sn.Folder), MaxSnippetFolderRunes)
 	if sn.Name == "" || strings.TrimSpace(sn.Body) == "" || len(sn.Body) > MaxTextBytes {
 		return nil
 	}

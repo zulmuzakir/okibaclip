@@ -35,6 +35,11 @@ const (
 	MaxHTMLBytes = 1 << 20
 	// MaxTitleRunes is the longest title an entry can carry.
 	MaxTitleRunes = 100
+	// MaxSourceRunes is the longest source app id or name an entry keeps.
+	MaxSourceRunes = 256
+	// MaxSnippetNameRunes and MaxSnippetFolderRunes cap snippet names and folders.
+	MaxSnippetNameRunes   = 100
+	MaxSnippetFolderRunes = 100
 	// MaxUndoBytes bounds the data a delete keeps for undo.
 	MaxUndoBytes = 64 << 20
 )

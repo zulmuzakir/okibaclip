@@ -152,3 +152,13 @@ func TestClassifyAcceptsPixelBoundary(t *testing.T) {
 		t.Errorf("ok = %v, dims = %dx%d", ok, got.Width, got.Height)
 	}
 }
+
+func TestClassifySkipsNonUTF8FilePaths(t *testing.T) {
+	d, err := transfer.FileData("/tmp/caf\xe9.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, ok := Classify(d, d.Formats(), settings.Default(), nil); ok {
+		t.Errorf("captured a path that is not valid UTF-8: %+v", got)
+	}
+}

@@ -19,7 +19,8 @@ func (a *app) exportTo(ctx context.Context, path string) error {
 	return fsutil.WriteFileAtomicFunc(path, func(w io.Writer) error { return a.store.WriteExport(ctx, w) })
 }
 
-// importFrom merges an export file into the store and applies retention.
+// importFrom merges an export file into the store and applies retention. It
+// prunes even when the import fails, since earlier batches stay committed.
 func (a *app) importFrom(ctx context.Context, path string, l history.Limits) (entries, snippets, dupes int, pruned int64, err error) {
 	fh, err := os.Open(path)
 	if err != nil {
@@ -27,10 +28,10 @@ func (a *app) importFrom(ctx context.Context, path string, l history.Limits) (en
 	}
 	defer fh.Close()
 	entries, snippets, dupes, err = a.store.Import(ctx, fh)
-	if err != nil {
-		return
+	pruned, perr := a.store.Prune(ctx, l, time.Now())
+	if err == nil {
+		err = perr
 	}
-	pruned, err = a.store.Prune(ctx, l, time.Now())
 	return
 }
 
@@ -87,16 +88,23 @@ func (a *app) importData() {
 			return
 		}
 		e, s, d, pruned, err := a.importFrom(a.ctx, paths[0], limits)
+		if pruned > 0 {
+			a.cleanImageFiles()
+		}
 		if err != nil {
-			mygo.Dialog.Error(appName, "Import failed: "+err.Error())
+			mygo.Dialog.Error(appName, "Import failed: "+err.Error()+"\n\nEntries and snippets read before the error were kept.")
+			a.post(func() {
+				a.changed()
+				a.registerSnippetShortcuts()
+			})
 			return
 		}
-		a.postSettings(func() {
-			msg := fmt.Sprintf("Imported %d entries and %d snippets (%d duplicates merged)", e, s, d)
-			if pruned > 0 {
-				msg += fmt.Sprintf("; %d entries removed by history limits", pruned)
-			}
-			a.settingsUI.toast = msg
+		msg := fmt.Sprintf("Imported %d entries and %d snippets (%d duplicates merged)", e, s, d)
+		if pruned > 0 {
+			msg += fmt.Sprintf("; %d entries removed by history limits", pruned)
+		}
+		a.postSettings(func() { a.settingsUI.toast = msg })
+		a.post(func() {
 			a.changed()
 			a.registerSnippetShortcuts()
 		})

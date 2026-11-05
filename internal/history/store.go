@@ -96,23 +96,30 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if _, err := db.Execute(ctx, "PRAGMA secure_delete = ON"); err != nil {
 		return fail(err)
 	}
-	// On a fresh file this takes effect; older files are converted below.
+	// On a fresh file this takes effect; older files are converted by ConvertAutoVacuum.
 	if _, err := db.Execute(ctx, "PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
 		return fail(err)
 	}
 	if err := migrate(ctx, db); err != nil {
 		return fail(err)
 	}
-	rows, err := db.Query(ctx, "PRAGMA auto_vacuum")
-	if err != nil {
-		return fail(err)
-	}
-	if len(rows.Values) == 0 || asInt(rows.Values[0][0]) != 2 {
-		if _, err := db.Execute(ctx, "VACUUM"); err != nil {
-			slog.Warn("vacuum", "err", err) // conversion is an optimization; the store works without it
-		}
-	}
 	return &Store{db: db}, nil
+}
+
+// ConvertAutoVacuum switches a database created before incremental
+// auto-vacuum to it, which rewrites the whole file with VACUUM. Open leaves
+// that to the caller so a large history does not delay startup; it is a no-op
+// once converted. Other store calls wait on the connection while it runs.
+func (s *Store) ConvertAutoVacuum(ctx context.Context) error {
+	rows, err := s.db.Query(ctx, "PRAGMA auto_vacuum")
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) > 0 && asInt(rows.Values[0][0]) == 2 {
+		return nil
+	}
+	_, err = s.db.Execute(ctx, "VACUUM")
+	return err
 }
 
 // Close closes the database.
@@ -225,8 +232,11 @@ RETURNING id, (use_count = 1)`,
 		return 0, false, errors.New("capture: no row returned")
 	}
 	if c.SourceApp != "" && c.SourcePath != "" {
+		// The entry is already committed: failing here would make the monitor
+		// retry and bump use_count again. The icon path is retried on the next
+		// capture from the same app.
 		if _, err := s.db.Execute(ctx, `INSERT INTO app_icons(app,path) VALUES(?,?) ON CONFLICT(app) DO UPDATE SET path=excluded.path, fetched=0, icon=NULL WHERE path!=excluded.path`, c.SourceApp, c.SourcePath); err != nil {
-			return 0, false, err
+			slog.Warn("app icon path", "app", c.SourceApp, "err", err)
 		}
 	}
 	return asInt(rows.Values[0][0]), asInt(rows.Values[0][1]) != 0, nil

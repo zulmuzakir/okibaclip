@@ -1,11 +1,15 @@
 package capture
 
 import (
+	"bytes"
+	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"context"
 	"errors"
+	"fmt"
 	"okibaclip/internal/history"
 	"okibaclip/internal/history/historytest"
 	"okibaclip/internal/settings"
@@ -561,5 +565,73 @@ func TestMonitorSkipsReannouncedContent(t *testing.T) {
 	f.tick(t)
 	if !slices.Equal(f.list(t), []string{"a"}) {
 		t.Errorf("deleted content not recaptured: %v", f.list(t))
+	}
+}
+
+func TestMonitorRecordsInvalidUTF8Text(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.owners = []Owner{{App: "caf\xe9", Name: "Caf\xe9"}}
+	f.clip.setText("caf\xe9 latin1")
+	f.tick(t)
+	l, err := f.store.List(f.ctx, history.Filter{Tab: "all"})
+	if err != nil || len(l) != 1 {
+		t.Fatalf("list = %v, %v", l, err)
+	}
+	if got := historytest.Texts(l); !slices.Equal(got, []string{"caf\uFFFD latin1"}) {
+		t.Errorf("texts = %q", got)
+	}
+	if l[0].SourceApp != "caf\uFFFD" || l[0].SourceName != "Caf\uFFFD" {
+		t.Errorf("source = %q / %q", l[0].SourceApp, l[0].SourceName)
+	}
+}
+
+func TestMonitorPruneCallsOnPrune(t *testing.T) {
+	f := newMonFixture(t, true)
+	s := settings.Default()
+	s.MaxEntries = 50
+	if err := f.m.SetConfig(s); err != nil {
+		t.Fatal(err)
+	}
+	pruned := 0
+	f.m.OnPrune = func() { pruned++ }
+	for i := range 50 {
+		f.clip.setText(fmt.Sprintf("entry %d", i))
+		f.tick(t)
+	}
+	if pruned != 0 {
+		t.Fatalf("OnPrune fired %d times within the limit", pruned)
+	}
+	f.clip.setText("one too many")
+	f.tick(t)
+	if pruned != 1 {
+		t.Errorf("OnPrune fired %d times after exceeding the limit; want 1", pruned)
+	}
+}
+
+func TestMonitorAbandonLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	f := newMonFixture(t, true)
+	f.clip.setText("hi")
+	f.clip.formats = nil
+	for range 3 {
+		f.tick(t)
+	}
+	if out := buf.String(); strings.Contains(out, "level=WARN") || !strings.Contains(out, "clipboard empty") {
+		t.Errorf("empty clipboard abandon logged %q; want a debug line and no warning", out)
+	}
+
+	buf.Reset()
+	f.clip.setText("again")
+	boom := errors.New("boom")
+	f.clip.readErrs = []error{boom, boom, boom}
+	for range 3 {
+		f.tick(t)
+	}
+	if out := buf.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "clipboard change abandoned") {
+		t.Errorf("read failures logged %q; want the abandon warning", out)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
@@ -83,6 +84,7 @@ func newPanelFixture(t *testing.T, items ...string) *panelFixture {
 	f := &panelFixture{}
 	a := newApp()
 	a.store = historytest.NewStore(t)
+	a.dataDir = t.TempDir() // actions that clean the data folder must not touch the working tree
 	a.async = func(fn func()) { fn() }
 	a.post = func(fn func()) { fn() }
 	a.writeClipboard = func(d transfer.Data) error { f.writes = append(f.writes, d); return nil }
@@ -895,5 +897,43 @@ func TestPanelDeleteRemovesCopiedImageFile(t *testing.T) {
 	f.a.deleteEntries([]int64{e.ID})
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Errorf("file survived delete: %v", err)
+	}
+}
+
+func TestClearHistoryRemovesQuarantinedHistory(t *testing.T) {
+	f := newPanelFixture(t, "a")
+	for _, n := range []string{"history.db.bad-20261105-143012", "history.db.bad-20261105-143012-journal", "settings.json.bad-20261105-143012"} {
+		if err := os.WriteFile(filepath.Join(f.a.dataDir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.a.messageDialog = func(mygo.MessageOptions) (mygo.MessageResult, error) { return mygo.MessageResult{Button: 0}, nil }
+	f.a.confirmClear(nil)
+	ents, _ := os.ReadDir(f.a.dataDir)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"settings.json.bad-20261105-143012"}) {
+		t.Errorf("data folder holds %v; want only the settings copy", names)
+	}
+}
+
+func TestHistoryCorruptOffersResetOnce(t *testing.T) {
+	f := newPanelFixture(t, "a")
+	asked, restarts := 0, 0
+	f.a.messageDialog = func(o mygo.MessageOptions) (mygo.MessageResult, error) {
+		asked++
+		return mygo.MessageResult{Button: 0}, nil
+	}
+	f.a.restart = func() { restarts++ }
+	cause := &sqlite.Error{Code: 11, Message: "database disk image is malformed"}
+	if !history.IsCorrupt(cause) {
+		t.Fatal("test error is not classified as corruption")
+	}
+	f.a.historyCorrupt(cause)
+	f.a.historyCorrupt(cause)
+	if asked != 1 || restarts != 1 || !f.a.resetHistory {
+		t.Errorf("asked %d times, restarted %d times, resetHistory %v; want 1, 1, true", asked, restarts, f.a.resetHistory)
 	}
 }

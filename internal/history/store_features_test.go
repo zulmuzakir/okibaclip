@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 
@@ -56,6 +57,9 @@ func TestOpenMigratesV1Database(t *testing.T) {
 
 	s, err := history.Open(ctx, p)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConvertAutoVacuum(ctx); err != nil {
 		t.Fatal(err)
 	}
 	l, err := s.List(ctx, history.Filter{Tab: "all"})
@@ -584,5 +588,32 @@ func TestImportDropsInvalidSnippetShortcut(t *testing.T) {
 	}
 	if len(got) != 2 || got["bare"] != "" || got["ok"] != "CmdOrCtrl+Alt+1" {
 		t.Errorf("snippets = %v", got)
+	}
+}
+
+func TestImportCapsFreeTextFields(t *testing.T) {
+	ctx := context.Background()
+	now := historytest.T0.UnixMilli()
+	in := historytest.Export(t,
+		[]history.ExportEntry{{Kind: history.KindText, Text: "hello", CreatedAt: now, UsedAt: now,
+			SourceApp: strings.Repeat("é", 1000), SourceName: strings.Repeat("é", 1000)}},
+		[]history.ExportSnippet{{Name: strings.Repeat("n", 1000), Body: "body", Folder: strings.Repeat("f", 1000)}})
+	dst := historytest.NewStore(t)
+	if _, _, _, err := dst.Import(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	l, err := dst.List(ctx, history.Filter{Tab: "all"})
+	if err != nil || len(l) != 1 {
+		t.Fatalf("list = %v, %v", l, err)
+	}
+	if n, m := utf8.RuneCountInString(l[0].SourceApp), utf8.RuneCountInString(l[0].SourceName); n != history.MaxSourceRunes || m != history.MaxSourceRunes {
+		t.Errorf("source runes = %d, %d; want %d", n, m, history.MaxSourceRunes)
+	}
+	sns, err := dst.Snippets(ctx, nil)
+	if err != nil || len(sns) != 1 {
+		t.Fatalf("snippets = %v, %v", sns, err)
+	}
+	if n, m := utf8.RuneCountInString(sns[0].Name), utf8.RuneCountInString(sns[0].Folder); n != history.MaxSnippetNameRunes || m != history.MaxSnippetFolderRunes {
+		t.Errorf("snippet runes = %d, %d; want %d, %d", n, m, history.MaxSnippetNameRunes, history.MaxSnippetFolderRunes)
 	}
 }

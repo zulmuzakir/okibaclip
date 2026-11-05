@@ -24,7 +24,8 @@ flowchart LR
 
 - **`main.go`:**
   - Sets the app name, takes the single-instance lock, points `PathUserData` at the `okibaclip` folder and runs `configureLinuxBackend` (Wayland/XWayland), then runs the app.
-  - `app.ready()` (`app.go`) opens `settings.json` and `history.db` from `mygo.App.Path(mygo.PathUserData)`, then builds the panel, tray and shortcut.
+  - `app.ready()` (`app.go`) loads `settings.json` from `mygo.App.Path(mygo.PathUserData)`, then opens `history.db` on a background goroutine (migration and corruption recovery can be slow) and calls `finishReady` on the main thread, which builds the panel, tray, shortcut and monitor. `Store.ConvertAutoVacuum` (the whole-file `VACUUM` for pre-v3 files) runs in the background after that.
+  - A list query that hits corruption `Open` missed (`history.IsCorrupt`) offers a reset once (`historyCorrupt`); on confirmation `OnWillQuit` closes the store and moves `history.db` aside (`quarantineHistory`), then the app relaunches.
 - **`app` struct (`app.go`):** the single owner of state. View state (`items`, `query`, `tab`, `selected`, `list`, `gen`/`previewGen`…) is touched only on the main thread.
 - **Monitor (`internal/capture/monitor.go`):** polls the clipboard. It uses a change token on macOS and Windows (`token_*.go`, build-tagged) and a content fingerprint elsewhere. Captures upsert by content hash (`history.Capture.Hash`), then `Prune` runs.
 - **Search (`internal/search`, `history.List`):**

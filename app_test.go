@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo"
@@ -49,5 +50,23 @@ func TestRecoverHistoryStartsEmpty(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path); string(b) != "garbage garbage garbage" {
 		t.Errorf("file touched: %q", b)
+	}
+}
+
+func TestQuarantineHistoryMovesDatabaseAndJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	os.WriteFile(path, []byte("db"), 0o600)
+	os.WriteFile(path+"-journal", []byte("journal"), 0o600)
+	if err := quarantineHistory(path, errors.New("damaged")); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(filepath.Dir(path))
+	if len(ents) != 2 {
+		t.Fatalf("data folder holds %d files, want the quarantined database and journal", len(ents))
+	}
+	for _, e := range ents {
+		if !strings.Contains(e.Name(), ".bad-") {
+			t.Errorf("%s was not quarantined", e.Name())
+		}
 	}
 }

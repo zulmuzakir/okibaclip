@@ -165,6 +165,12 @@ type app struct {
 
 	quitting    bool
 	waylandMode string
+	// Set when a query hit corruption that Open missed: corruptAsked stops
+	// repeat prompts; resetHistory makes the quit move history.db aside.
+	corruptAsked bool
+	resetHistory bool
+	resetCause   error
+	restart      func() // relaunches the app; a seam for tests
 	// waylandCapture is set when wl-paste captures copies natively.
 	waylandCapture bool
 	pasteOK        bool
@@ -200,6 +206,7 @@ func newApp() *app {
 		openDialog:    mygo.Dialog.Open,
 		messageDialog: mygo.Dialog.Message,
 		cfg:           settings.Default(),
+		restart:       mygo.App.Relaunch,
 	}
 	a.panelHidden = a.panelHiddenNow
 	a.async = func(fn func()) {
@@ -221,7 +228,22 @@ func newApp() *app {
 // recoverHistory asks whether to set a damaged history.db aside and start
 // with empty history. It returns a nil store and nil error when the user quits.
 func (a *app) recoverHistory(ctx context.Context, path string, cause error) (*history.Store, error) {
-	res, err := a.messageDialog(mygo.MessageOptions{
+	res, err := a.messageDialog(corruptDialog(cause))
+	if err != nil {
+		return nil, err
+	}
+	if res.Button != 0 {
+		return nil, nil
+	}
+	if err := quarantineHistory(path, cause); err != nil {
+		return nil, err
+	}
+	return history.Open(ctx, path)
+}
+
+// corruptDialog is the prompt shown when history.db is damaged.
+func corruptDialog(cause error) mygo.MessageOptions {
+	return mygo.MessageOptions{
 		Type:               mygo.MessageWarning,
 		Title:              appName,
 		Message:            "Clipboard history is damaged",
@@ -230,16 +252,15 @@ func (a *app) recoverHistory(ctx context.Context, path string, cause error) (*hi
 		DefaultButton:      0,
 		CancelButton:       1,
 		DestructiveButtons: []int{0},
-	})
-	if err != nil {
-		return nil, err
 	}
-	if res.Button != 0 {
-		return nil, nil
-	}
+}
+
+// quarantineHistory moves the damaged history.db at path, and its journal,
+// aside. The database must be closed first (Windows cannot rename an open file).
+func quarantineHistory(path string, cause error) error {
 	bad, err := fsutil.Quarantine(path, time.Now())
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := os.Stat(path + "-journal"); err == nil {
 		if err := os.Rename(path+"-journal", bad+"-journal"); err != nil {
@@ -247,7 +268,32 @@ func (a *app) recoverHistory(ctx context.Context, path string, cause error) (*hi
 		}
 	}
 	slog.Warn("history", "err", cause, "moved_to", bad)
-	return history.Open(ctx, path)
+	return nil
+}
+
+// historyCorrupt offers to reset the history after a query hit damage that
+// Open did not see. It asks once; on confirmation the file is moved aside as
+// the app quits (OnWillQuit) and the app starts again with an empty history.
+// Main thread only.
+func (a *app) historyCorrupt(cause error) {
+	if a.corruptAsked {
+		return
+	}
+	a.corruptAsked = true
+	a.async(func() {
+		res, err := a.messageDialog(corruptDialog(cause))
+		a.post(func() {
+			switch {
+			case err != nil:
+				slog.Error("corrupt history dialog", "err", err)
+			case res.Button == 0:
+				a.resetHistory, a.resetCause = true, cause
+				a.restart()
+			default:
+				mygo.App.Quit()
+			}
+		})
+	})
 }
 
 func (a *app) ready() {
@@ -289,19 +335,61 @@ func (a *app) ready() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.ctx, a.cancel = ctx, cancel
 	dbPath := filepath.Join(dir, "history.db")
-	a.store, err = history.Open(ctx, dbPath)
-	if history.IsCorrupt(err) {
-		a.store, err = a.recoverHistory(ctx, dbPath, err)
-		if a.store == nil && err == nil {
-			mygo.App.Quit()
-			return
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.cancel()
+		if !waitBackground(2*time.Second, a.monDone, &a.jobs) {
+			slog.Warn("shutdown: background work still running")
 		}
-	}
-	if err != nil {
-		mygo.Dialog.Error(appName, "Cannot open history: "+err.Error())
-		mygo.App.Quit()
-		return
-	}
+		if a.tray != nil {
+			a.tray.Destroy()
+		}
+		if a.store != nil {
+			a.store.Close()
+			if a.resetHistory {
+				if err := quarantineHistory(dbPath, a.resetCause); err != nil {
+					slog.Error("history reset", "err", err)
+				}
+			}
+		}
+	})
+	// Opening may migrate or recover the database: keep that off the main
+	// thread so the event loop stays responsive, then finish startup there.
+	a.async(func() {
+		store, err := history.Open(ctx, dbPath)
+		if history.IsCorrupt(err) {
+			store, err = a.recoverHistory(ctx, dbPath, err)
+			if store == nil && err == nil {
+				mygo.RunOnMain(mygo.App.Quit)
+				return
+			}
+		}
+		mygo.RunOnMain(func() {
+			if ctx.Err() != nil {
+				if store != nil {
+					store.Close()
+				}
+				return
+			}
+			if err != nil {
+				mygo.Dialog.Error(appName, "Cannot open history: "+err.Error())
+				mygo.App.Quit()
+				return
+			}
+			a.store = store
+			a.finishReady()
+		})
+	})
+}
+
+// finishReady builds the panel, tray and monitor once the store is open.
+// Main thread only.
+func (a *app) finishReady() {
+	ctx := a.ctx
+	a.async(func() {
+		if err := a.store.ConvertAutoVacuum(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("vacuum", "err", err) // conversion is an optimization; the store works without it
+		}
+	})
 
 	a.panel = mygo.NewWindow(mygo.WindowOptions{
 		Title:         appName,
@@ -338,6 +426,7 @@ func (a *app) ready() {
 	a.pasteOK, a.pasteNote = paste.Available(a.waylandMode)
 	a.async(a.cleanImageFiles)
 	m := capture.New(a.src, a.store, a.cfg, func() { a.post(a.changed) })
+	m.OnPrune = a.cleanImageFiles
 	a.mon = m
 	done := make(chan struct{})
 	a.monDone = done
@@ -359,16 +448,6 @@ func (a *app) ready() {
 	a.refreshData()
 	a.registerSnippetShortcuts()
 
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
-		a.cancel()
-		if !waitBackground(2*time.Second, a.monDone, &a.jobs) {
-			slog.Warn("shutdown: background work still running")
-		}
-		if a.tray != nil {
-			a.tray.Destroy()
-		}
-		a.store.Close()
-	})
 }
 
 // waitBackground waits for done (nil = already finished) and then for jobs, giving up after d. It reports whether everything finished in time.
@@ -473,6 +552,9 @@ func (a *app) reload() {
 				slog.Error("list", "err", err)
 			}
 			a.post(func() {
+				if history.IsCorrupt(err) {
+					a.historyCorrupt(err)
+				}
 				if gen == a.gen {
 					a.listStale, a.afterList = false, nil
 				}

@@ -16,3 +16,13 @@ func Restrict(path string) error {
 	}
 	return os.Chmod(path, 0o600)
 }
+
+// syncDir flushes dir's entries so a rename into it survives a crash.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}

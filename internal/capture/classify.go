@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/transfer"
 
@@ -20,7 +21,9 @@ func hasFormat(offered []transfer.Format, f transfer.Format) bool { return slice
 // it returns false, reason says why (empty when there is nothing to record).
 func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, patterns []*regexp.Regexp) (history.Capture, string, bool) {
 	if s.CaptureFiles && (hasFormat(offered, transfer.FileList) || hasFormat(offered, transfer.URIList)) {
-		if files, err := d.Files(); err == nil && len(files) > 0 {
+		// A path that is not valid UTF-8 cannot be stored, and rewriting its
+		// bytes would name a different file, so such a copy is not a files capture.
+		if files, err := d.Files(); err == nil && len(files) > 0 && !slices.ContainsFunc(files, func(p string) bool { return !utf8.ValidString(p) }) {
 			return history.Capture{Kind: history.KindFiles, Text: strings.Join(files, "\n")}, "", true
 		}
 	}
@@ -30,7 +33,7 @@ func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, p
 			if len(b) > history.MaxTextBytes {
 				return history.Capture{}, "text over 1 MiB", false
 			}
-			text := string(b)
+			text := strings.ToValidUTF8(string(b), "\uFFFD")
 			trimmed := strings.TrimSpace(text)
 			for _, re := range patterns {
 				if re.MatchString(trimmed) {
@@ -40,7 +43,7 @@ func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, p
 			c := history.Capture{Kind: history.TextKind(text), Text: text}
 			if c.Kind == history.KindText && hasFormat(offered, transfer.HTML) {
 				if h, err := d.Read(transfer.HTML); err == nil && len(h) > 0 && len(h) <= history.MaxHTMLBytes {
-					c.HTML = string(h)
+					c.HTML = strings.ToValidUTF8(string(h), "\uFFFD")
 				}
 			}
 			return c, "", true

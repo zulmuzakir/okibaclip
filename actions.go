@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"okibaclip/internal/fsutil"
 	"okibaclip/internal/history"
 )
 
@@ -92,6 +94,9 @@ func (a *app) confirmClear(parent *mygo.Window) {
 			return
 		}
 		a.cleanImageFiles()
+		if err := fsutil.RemoveQuarantined(filepath.Join(a.dataDir, "history.db")); err != nil {
+			slog.Warn("remove quarantined history", "err", err)
+		}
 		a.post(a.changed)
 	})
 }
