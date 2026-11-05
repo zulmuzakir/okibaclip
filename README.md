@@ -54,4 +54,17 @@ macOS 15.4+ may ask whether Okiba Clip may read the pasteboard from other apps; 
 
 ## Release
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds every platform and attaches the installers to a draft release. Auto-update is not configured.
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds every platform and attaches the installers to a draft release. Review the draft and publish it by hand. Auto-update is not configured.
+
+## Unsigned builds
+
+Release builds are not code-signed or notarized, so the first launch needs one extra step:
+
+- **macOS:** Gatekeeper blocks the app. Open System Settings › Privacy & Security and choose Open Anyway.
+- **Windows:** SmartScreen shows "Windows protected your PC". Choose More info › Run anyway.
+
+Signing will be added once Developer ID and Windows code-signing certificates exist.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
