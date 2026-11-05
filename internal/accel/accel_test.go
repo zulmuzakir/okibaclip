@@ -24,3 +24,26 @@ func TestAccelKey(t *testing.T) {
 		}
 	}
 }
+
+func TestValid(t *testing.T) {
+	cases := []struct {
+		acc  string
+		want error
+	}{
+		{"a", ErrNoModifier},
+		{"Shift+A", ErrNoModifier},
+		{"Enter", ErrNoModifier},
+		{"Ctrl+", ErrNoKey},
+		{"", ErrNoKey},
+		{"CmdOrCtrl+V", ErrReserved},
+		{"cmd+v", ErrReserved},
+		{"Alt+Tab", ErrReserved},
+		{"Alt+Shift+V", nil},
+		{"CmdOrCtrl+Alt+1", nil},
+	}
+	for _, c := range cases {
+		if got := Valid(c.acc); got != c.want {
+			t.Errorf("Valid(%q) = %v; want %v", c.acc, got, c.want)
+		}
+	}
+}

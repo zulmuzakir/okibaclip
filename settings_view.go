@@ -426,7 +426,7 @@ func (a *app) historySection(c *ui.Context) {
 		appsHelp += " Wayland clipboard capture can't tell which app copied, so this list has no effect."
 	}
 	settingsGroup(c, "Ignore", func() {
-		settingBlock(c, "Ignore patterns", "One regular expression per line. Text matching one entirely is not recorded.", s.patErr, func() {
+		settingBlock(c, "Ignore patterns", "One regular expression per line. Text containing a match is not recorded; use ^…$ to match the whole text.", s.patErr, func() {
 			a.commitOnBlur("patterns", ui.TextArea(c, &s.patterns).Label("Ignore patterns").FillWidth().Height(90))
 		})
 		settingBlock(c, "Ignore apps", appsHelp, "", func() {

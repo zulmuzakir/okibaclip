@@ -52,3 +52,7 @@ func frontOwner() Owner {
 	base := filepath.Base(path)
 	return Owner{App: strings.ToLower(base), Name: strings.TrimSuffix(base, filepath.Ext(base)), Path: path}
 }
+
+func noteFront() {}
+
+func clipOwners() []Owner { return appendOwner(nil, frontOwner()) }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"okibaclip/internal/accel"
 	"okibaclip/internal/fsutil"
 	"okibaclip/internal/history"
 )
@@ -82,15 +83,6 @@ func Load(path string) (Settings, error) {
 	return s, nil
 }
 
-// Quarantine renames path to path+".bad-"+now.Format("20060102-150405") and returns the new path.
-func Quarantine(path string, now time.Time) (string, error) {
-	bad := path + ".bad-" + now.Format("20060102-150405")
-	if err := os.Rename(path, bad); err != nil {
-		return "", err
-	}
-	return bad, nil
-}
-
 // Normalize clamps values to their ranges, drops ignore patterns that do not
 // compile (logging each one) and normalizes the ignored app names.
 func (s *Settings) Normalize() {
@@ -100,6 +92,10 @@ func (s *Settings) Normalize() {
 	s.MaxStorageMB = min(max(s.MaxStorageMB, 100), 20480)
 	if !slices.Contains(PollIntervals, s.PollMillis) {
 		s.PollMillis = 500
+	}
+	if s.Shortcut != "" && accel.Valid(s.Shortcut) != nil {
+		slog.Warn("shortcut dropped", "accelerator", s.Shortcut)
+		s.Shortcut = ""
 	}
 	kept, _, bad := CompilePatterns(s.IgnorePatterns)
 	for _, e := range bad {

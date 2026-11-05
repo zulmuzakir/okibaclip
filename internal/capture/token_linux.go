@@ -17,6 +17,7 @@ import (
 type selWatch struct {
 	conn  *xgb.Conn
 	n     atomic.Uint64
+	owner atomic.Pointer[Owner] // app that took the selection at the last change
 	alive atomic.Bool
 }
 
@@ -58,7 +59,12 @@ func watchSelection(display string) (*selWatch, error) {
 				w.alive.Store(false)
 				return
 			}
-			if _, ok := ev.(xfixes.SelectionNotifyEvent); ok {
+			if sn, ok := ev.(xfixes.SelectionNotifyEvent); ok {
+				o := Owner{}
+				if sn.Subtype == xfixes.SelectionEventSetSelectionOwner {
+					o = selectionOwner(sn.Owner)
+				}
+				w.owner.Store(&o)
 				w.n.Add(1)
 			}
 		}
@@ -87,9 +93,9 @@ var xsel struct {
 	w    *selWatch
 }
 
-// changeToken is the XFixes CLIPBOARD owner-change count on X11. It reports
-// false when the session is not X11 or the watch could not start.
-func changeToken() (uint64, bool) {
+// selectionWatch starts the XFixes watch on first use. It is nil when the
+// session is not X11 or the watch could not start.
+func selectionWatch() *selWatch {
 	xsel.once.Do(func() {
 		if !useX11Token() {
 			return
@@ -101,8 +107,15 @@ func changeToken() (uint64, bool) {
 		}
 		xsel.w = w
 	})
-	if xsel.w == nil {
+	return xsel.w
+}
+
+// changeToken is the XFixes CLIPBOARD owner-change count on X11. It reports
+// false when the session is not X11 or the watch could not start.
+func changeToken() (uint64, bool) {
+	w := selectionWatch()
+	if w == nil {
 		return 0, false
 	}
-	return xsel.w.token()
+	return w.token()
 }

@@ -233,6 +233,10 @@ func (a *app) registerSnippetShortcuts() {
 					continue
 				}
 				key := accel.Key(acc)
+				if err := accel.Valid(acc); err != nil {
+					slog.Warn("snippet shortcut", "accelerator", acc, "err", err)
+					continue
+				}
 				if _, dup := a.snipKeys[key]; dup || key == accel.Key(a.shortcut) {
 					slog.Warn("snippet shortcut", "accelerator", acc, "err", "already in use")
 					continue
@@ -294,6 +298,10 @@ func (a *app) saveEditor() {
 	acc := strings.TrimSpace(a.editor.shortcut)
 	key := accel.Key(acc)
 	if key != "" {
+		if err := accel.Valid(acc); err != nil {
+			a.editor.err = err.Error()
+			return
+		}
 		if key == accel.Key(a.shortcut) {
 			a.editor.err = "That shortcut opens the panel"
 			return

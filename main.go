@@ -22,7 +22,7 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance gets our arguments (OnSecondInstance)
 	}
-	if base, err := mygo.App.Path(mygo.PathAppData); err == nil {
+	if base, err := dataBase(); err == nil {
 		mygo.App.SetPath(mygo.PathUserData, filepath.Join(base, dataDirName))
 	}
 	a := newApp()

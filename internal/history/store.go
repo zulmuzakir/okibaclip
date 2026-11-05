@@ -93,6 +93,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := fsutil.Restrict(path); err != nil {
 		return fail(err)
 	}
+	if _, err := db.Execute(ctx, "PRAGMA secure_delete = ON"); err != nil {
+		return fail(err)
+	}
 	// On a fresh file this takes effect; older files are converted below.
 	if _, err := db.Execute(ctx, "PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
 		return fail(err)
@@ -549,6 +552,9 @@ func (s *Store) Delete(ctx context.Context, ids ...int64) (deleted int64, undo [
 	}
 	if len(rows.Values) > 0 && asInt(rows.Values[0][0]) > MaxUndoBytes {
 		r, err := s.db.Execute(ctx, `DELETE FROM entries WHERE id IN (`+in+`)`, args...)
+		if r.Changes > 0 {
+			s.compact(ctx)
+		}
 		return r.Changes, nil, err
 	}
 	rows, err = s.db.Query(ctx, `DELETE FROM entries WHERE id IN (`+in+`) RETURNING `+fullCols, args...)
@@ -556,6 +562,9 @@ func (s *Store) Delete(ctx context.Context, ids ...int64) (deleted int64, undo [
 		return 0, nil, err
 	}
 	undo = scanRows(rows, scanFull)
+	if len(undo) > 0 {
+		s.compact(ctx)
+	}
 	return int64(len(undo)), undo, nil
 }
 
@@ -597,10 +606,25 @@ func (s *Store) HasHash(ctx context.Context, hash string) (bool, error) {
 	return len(rows.Values) > 0, nil
 }
 
+// HasHashPrefix reports whether an entry's hash starts with prefix (lower-case hex).
+func (s *Store) HasHashPrefix(ctx context.Context, prefix string) (bool, error) {
+	rows, err := s.db.Query(ctx, `SELECT 1 FROM entries WHERE hash >= ? AND hash < ? LIMIT 1`, prefix, prefix+"g")
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Values) > 0, nil
+}
+
 // isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure.
 func isUniqueViolation(err error) bool {
 	var se *sqlite.Error
 	return errors.As(err, &se) && se.ExtendedCode == 2067
+}
+
+// IsCorrupt reports whether err means the database file is damaged or not a database.
+func IsCorrupt(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && (se.Code == 11 || se.Code == 26) // SQLITE_CORRUPT, SQLITE_NOTADB
 }
 
 // idList returns "?,?,…" for ids and the matching args.
@@ -621,6 +645,9 @@ func (s *Store) Clear(ctx context.Context, keepPinned bool) (int64, error) {
 		q += ` WHERE pinned=0`
 	}
 	r, err := s.db.Execute(ctx, q)
+	if r.Changes > 0 {
+		s.compact(ctx)
+	}
 	return r.Changes, err
 }
 
@@ -638,6 +665,14 @@ const rowBytes = `size + coalesce(length(CAST(html AS BLOB)),0) + coalesce(lengt
 // count toward MaxBytes but are never removed, and the newest unpinned entry
 // always stays.
 func (s *Store) Prune(ctx context.Context, l Limits, now time.Time) (int64, error) {
+	total, err := s.prune(ctx, l, now)
+	if total > 0 {
+		s.compact(ctx)
+	}
+	return total, err
+}
+
+func (s *Store) prune(ctx context.Context, l Limits, now time.Time) (int64, error) {
 	var total int64
 	newest := `id != (SELECT id FROM entries WHERE pinned=0 ORDER BY used_at DESC, id DESC LIMIT 1)`
 	if l.Retention > 0 {
@@ -666,10 +701,12 @@ func (s *Store) Prune(ctx context.Context, l Limits, now time.Time) (int64, erro
 	return total, nil
 }
 
-// Compact returns space freed by deletions to the file system.
-func (s *Store) Compact(ctx context.Context) error {
-	_, err := s.db.Query(ctx, "PRAGMA incremental_vacuum")
-	return err
+// compact returns space freed by deletions to the file system. Failures are
+// logged: the deletion that triggered it already succeeded.
+func (s *Store) compact(ctx context.Context) {
+	if _, err := s.db.Query(ctx, "PRAGMA incremental_vacuum"); err != nil {
+		slog.Warn("compact", "err", err)
+	}
 }
 
 // Usage is the stored size of the history's content.

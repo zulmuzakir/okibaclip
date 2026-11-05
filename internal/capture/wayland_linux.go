@@ -152,7 +152,7 @@ func (w *waylandSource) supervise(ctx context.Context, cur watcher) {
 
 func (w *waylandSource) Token() (uint64, bool) { return w.tok.Load(), true }
 
-func (w *waylandSource) Owner() Owner { return Owner{} }
+func (w *waylandSource) Owners() []Owner { return nil }
 
 // NativeFormats lists the MIME types the selection offers. The list is
 // cached per change token, so reads of an unchanged selection skip wl-paste.

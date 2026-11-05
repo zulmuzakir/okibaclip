@@ -31,8 +31,9 @@ func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, p
 				return history.Capture{}, "text over 1 MiB", false
 			}
 			text := string(b)
+			trimmed := strings.TrimSpace(text)
 			for _, re := range patterns {
-				if re.MatchString(text) {
+				if re.MatchString(trimmed) {
 					return history.Capture{}, "matches ignore pattern", false
 				}
 			}

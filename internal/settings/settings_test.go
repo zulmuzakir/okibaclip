@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestLoadSettingsMissingFileGivesDefaults(t *testing.T) {
@@ -100,26 +99,6 @@ func TestLoadCorruptIsErrCorrupt(t *testing.T) {
 	os.WriteFile(p, []byte(`{nope`), 0o600)
 	if _, err := Load(p); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("err = %v; want ErrCorrupt", err)
-	}
-}
-
-func TestQuarantineMovesCorruptFile(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "settings.json")
-	os.WriteFile(p, []byte(`{nope`), 0o600)
-	now := time.Date(2026, 11, 5, 14, 30, 12, 0, time.UTC)
-	got, err := Quarantine(p, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := p + ".bad-20261105-143012"; got != want {
-		t.Errorf("Quarantine = %q; want %q", got, want)
-	}
-	b, err := os.ReadFile(got)
-	if err != nil || string(b) != `{nope` {
-		t.Errorf("quarantined file = %q, %v", b, err)
-	}
-	if _, err := os.Stat(p); !os.IsNotExist(err) {
-		t.Errorf("original still present: %v", err)
 	}
 }
 

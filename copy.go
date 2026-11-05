@@ -330,7 +330,8 @@ func (a *app) copyImageFile(e history.Entry) {
 	})
 }
 
-// cleanImageFiles removes copied-as-file images older than a day.
+// cleanImageFiles removes copied-as-file images whose entry is gone, and any
+// file in the folder older than a day.
 func (a *app) cleanImageFiles() {
 	dir := a.imageFileDir()
 	ents, err := os.ReadDir(dir)
@@ -338,10 +339,41 @@ func (a *app) cleanImageFiles() {
 		return
 	}
 	for _, de := range ents {
-		if info, err := de.Info(); err == nil && !info.IsDir() && time.Since(info.ModTime()) > 24*time.Hour {
+		info, err := de.Info()
+		if err != nil || info.IsDir() {
+			continue
+		}
+		remove := time.Since(info.ModTime()) > 24*time.Hour
+		if hex, ok := imageFileHash(de.Name()); ok && !remove && info.Mode().IsRegular() {
+			has, err := a.store.HasHashPrefix(a.ctx, hex)
+			if err != nil {
+				slog.Warn("image file check", "err", err)
+				continue
+			}
+			remove = !has
+		}
+		if remove {
 			os.Remove(filepath.Join(dir, de.Name()))
 		}
 	}
+}
+
+// imageFileHash returns the 12 hex digits of an "Image-<12 hex>.png" name.
+func imageFileHash(name string) (string, bool) {
+	hex, ok := strings.CutPrefix(name, "Image-")
+	if !ok {
+		return "", false
+	}
+	hex, ok = strings.CutSuffix(hex, ".png")
+	if !ok || len(hex) != 12 {
+		return "", false
+	}
+	for _, c := range hex {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", false
+		}
+	}
+	return hex, true
 }
 
 func pasteKey() string {

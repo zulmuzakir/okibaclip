@@ -3,6 +3,9 @@ package history_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -85,6 +88,8 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	db.Close()
 	if _, err := history.Open(ctx, p); err == nil || !strings.Contains(err.Error(), "newer than this Okiba Clip supports") {
 		t.Fatalf("err = %v", err)
+	} else if history.IsCorrupt(err) {
+		t.Errorf("newer schema reported as corruption: %v", err)
 	}
 }
 
@@ -145,7 +150,7 @@ func TestPruneStorageBudgetKeepsPinnedAndNewest(t *testing.T) {
 	}
 }
 
-func TestCompactShrinksFile(t *testing.T) {
+func TestClearShrinksFile(t *testing.T) {
 	ctx := context.Background()
 	p := filepath.Join(t.TempDir(), "history.db")
 	s, err := history.Open(ctx, p)
@@ -158,9 +163,6 @@ func TestCompactShrinksFile(t *testing.T) {
 	}
 	before, _ := os.Stat(p)
 	if _, err := s.Clear(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Compact(ctx); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(p)
@@ -306,12 +308,8 @@ func TestExportImportKeepsV2Fields(t *testing.T) {
 	if err := src.WriteExport(ctx, &buf); err != nil {
 		t.Fatal(err)
 	}
-	f, err := history.DecodeExport(buf.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
 	dst := historytest.NewStore(t)
-	if _, _, _, err := dst.Import(ctx, f); err != nil {
+	if _, _, _, err := dst.Import(ctx, bytes.NewReader(buf.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	l, _ := dst.List(ctx, history.Filter{Tab: "pinned"})
@@ -325,9 +323,7 @@ func TestExportImportKeepsV2Fields(t *testing.T) {
 	if len(sn) != 1 || sn[0].Folder != "Work" || sn[0].Shortcut != "CmdOrCtrl+1" {
 		t.Errorf("snippets = %+v", sn)
 	}
-	if f2, err := history.DecodeExport([]byte(`{"format":"okibaclip-export","version":1,"entries":[{"kind":"text","text":"old"}],"snippets":[]}`)); err != nil {
-		t.Fatal(err)
-	} else if _, _, _, err := dst.Import(ctx, f2); err != nil {
+	if _, _, _, err := dst.Import(ctx, strings.NewReader(`{"format":"okibaclip-export","version":1,"entries":[{"kind":"text","text":"old"}],"snippets":[]}`)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -469,16 +465,13 @@ func TestSetTitleCapsRunes(t *testing.T) {
 func TestImportSkipsInvalidSnippetsAndHugeImages(t *testing.T) {
 	ctx := context.Background()
 	now := historytest.T0.UnixMilli()
-	f := history.ExportFile{
-		Format:  history.ExportFormat,
-		Version: history.ExportVersion,
-		Entries: []history.ExportEntry{{Kind: history.KindImage, Image: historytest.PNGHeader(8001, 5001), Width: 8001, Height: 5001, CreatedAt: now, UsedAt: now}},
-		Snippets: []history.ExportSnippet{
+	f := historytest.Export(t,
+		[]history.ExportEntry{{Kind: history.KindImage, Image: historytest.PNGHeader(8001, 5001), Width: 8001, Height: 5001, CreatedAt: now, UsedAt: now}},
+		[]history.ExportSnippet{
 			{Name: "  ", Body: "x"},
 			{Name: "huge", Body: strings.Repeat("x", history.MaxTextBytes+1)},
 			{Name: " Hi ", Body: "hello"},
-		},
-	}
+		})
 	dst := historytest.NewStore(t)
 	entries, snippets, _, err := dst.Import(ctx, f)
 	if err != nil {
@@ -489,5 +482,107 @@ func TestImportSkipsInvalidSnippetsAndHugeImages(t *testing.T) {
 	}
 	if sn, _ := dst.Snippets(ctx, nil); len(sn) != 1 || sn[0].Name != "Hi" {
 		t.Errorf("snippets = %+v, want one named Hi", sn)
+	}
+}
+
+func TestDeleteOverwritesContent(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "h.db")
+	s, err := history.Open(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "okiba-secret-7f3a91"}, historytest.T0)
+	if _, _, err := s.Delete(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("okiba-secret-7f3a91")) {
+		t.Error("deleted text still in database file")
+	}
+}
+
+func TestOpenReportsCorruption(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "h.db")
+	if err := os.WriteFile(p, bytes.Repeat([]byte("not a database"), 300), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := history.Open(context.Background(), p)
+	if err == nil || !history.IsCorrupt(err) {
+		t.Fatalf("err = %v; want corruption", err)
+	}
+}
+
+type repeatReader struct{ n int }
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.n)
+	for i := range n {
+		p[i] = 'a'
+	}
+	r.n -= n
+	return n, nil
+}
+
+func TestImportRejectsOversizedValue(t *testing.T) {
+	in := io.MultiReader(
+		strings.NewReader(`{"format":"okibaclip-export","version":2,"entries":[{"kind":"text","text":"`),
+		&repeatReader{n: 128<<20 + 1},
+		strings.NewReader(`"}],"snippets":[]}`),
+	)
+	e, _, _, err := historytest.NewStore(t).Import(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "over 128 MiB") || e != 0 {
+		t.Fatalf("entries=%d err=%v", e, err)
+	}
+}
+
+func TestWriteExportPagesByBytes(t *testing.T) {
+	s := historytest.NewStore(t)
+	const n = 40 // about 80 MiB of content with search, well over one export page
+	for i := range n {
+		text := fmt.Sprintf("%03d", i) + strings.Repeat("x", history.MaxTextBytes-3)
+		historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: text}, historytest.T0.Add(time.Duration(i)*time.Minute))
+	}
+	var buf bytes.Buffer
+	if err := s.WriteExport(context.Background(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	var f struct{ Entries []history.ExportEntry }
+	if err := json.Unmarshal(buf.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != n {
+		t.Fatalf("exported %d entries, want %d", len(f.Entries), n)
+	}
+	for i, e := range f.Entries {
+		if want := fmt.Sprintf("%03d", n-1-i); e.Text[:3] != want {
+			t.Fatalf("entry %d starts %q, want %q", i, e.Text[:3], want)
+		}
+	}
+}
+
+func TestImportDropsInvalidSnippetShortcut(t *testing.T) {
+	dst := historytest.NewStore(t)
+	in := historytest.Export(t, nil, []history.ExportSnippet{
+		{Name: "bare", Body: "x", Shortcut: "a"},
+		{Name: "ok", Body: "y", Shortcut: "CmdOrCtrl+Alt+1"},
+	})
+	if _, _, _, err := dst.Import(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	sns, _ := dst.Snippets(context.Background(), nil)
+	for _, sn := range sns {
+		got[sn.Name] = sn.Shortcut
+	}
+	if len(got) != 2 || got["bare"] != "" || got["ok"] != "CmdOrCtrl+Alt+1" {
+		t.Errorf("snippets = %v", got)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+
+	"okibaclip/internal/accel"
 )
 
 var defaultShortcuts = []string{"Alt+Shift+V", "CmdOrCtrl+Alt+Shift+V"}
@@ -33,6 +35,11 @@ func (a *app) registerShortcut() {
 // applyShortcut replaces the global shortcut; on failure the old one stays.
 func (a *app) applyShortcut(acc string) error {
 	acc = strings.TrimSpace(acc)
+	if acc != "" {
+		if err := accel.Valid(acc); err != nil {
+			return err
+		}
+	}
 	old := a.shortcut
 	if old != "" {
 		a.hotkeys.Unregister(old)

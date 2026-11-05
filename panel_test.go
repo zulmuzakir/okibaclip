@@ -866,3 +866,34 @@ func TestPanelPlainToastDropsStaleUndo(t *testing.T) {
 		t.Errorf("plain toast missing: %q", f.tt.Texts())
 	}
 }
+
+func TestPanelSnippetShortcutNeedsModifier(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.shortcut = "Alt+Shift+V"
+	f.a.newSnippet("n", "body")
+	f.a.editor.shortcut = "a"
+	f.a.saveEditor()
+	if !f.a.editor.open || f.a.editor.err != "Shortcut needs Ctrl, Alt, Cmd or Super" {
+		t.Errorf("open=%v err=%q", f.a.editor.open, f.a.editor.err)
+	}
+	if len(f.keys.registered) != 0 {
+		t.Errorf("registered %v", f.keys.registered)
+	}
+}
+
+func TestPanelDeleteRemovesCopiedImageFile(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.dataDir = t.TempDir()
+	historytest.Add(t, f.a.store, history.Capture{Kind: history.KindImage, Image: historytest.PNG(t, 6, 6), Width: 6, Height: 6}, historytest.T0)
+	f.a.reload()
+	e := f.a.items[0]
+	f.a.copyImageFile(e)
+	p := filepath.Join(f.a.dataDir, "files", "Image-"+e.Hash[:12]+".png")
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("copied file missing: %v", err)
+	}
+	f.a.deleteEntries([]int64{e.ID})
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("file survived delete: %v", err)
+	}
+}

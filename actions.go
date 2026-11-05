@@ -41,6 +41,7 @@ func (a *app) deleteEntries(ids []int64) {
 			a.post(func() { a.toast = "Delete failed: " + err.Error() })
 			return
 		}
+		a.cleanImageFiles()
 		a.post(func() {
 			a.selected.Clear()
 			a.toast = deletedMessage(int(n))
@@ -90,9 +91,7 @@ func (a *app) confirmClear(parent *mygo.Window) {
 			slog.Error("clear", "err", err)
 			return
 		}
-		if err := a.store.Compact(a.ctx); err != nil {
-			slog.Error("compact", "err", err)
-		}
+		a.cleanImageFiles()
 		a.post(a.changed)
 	})
 }

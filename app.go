@@ -218,6 +218,38 @@ func newApp() *app {
 	return a
 }
 
+// recoverHistory asks whether to set a damaged history.db aside and start
+// with empty history. It returns a nil store and nil error when the user quits.
+func (a *app) recoverHistory(ctx context.Context, path string, cause error) (*history.Store, error) {
+	res, err := a.messageDialog(mygo.MessageOptions{
+		Type:               mygo.MessageWarning,
+		Title:              appName,
+		Message:            "Clipboard history is damaged",
+		Detail:             appName + " can move the damaged file aside and start with empty history. Its entries, pins and snippets are not recovered.\n\n" + cause.Error(),
+		Buttons:            []string{"Start with Empty History", "Quit"},
+		DefaultButton:      0,
+		CancelButton:       1,
+		DestructiveButtons: []int{0},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res.Button != 0 {
+		return nil, nil
+	}
+	bad, err := fsutil.Quarantine(path, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path + "-journal"); err == nil {
+		if err := os.Rename(path+"-journal", bad+"-journal"); err != nil {
+			slog.Warn("history journal quarantine", "err", err)
+		}
+	}
+	slog.Warn("history", "err", cause, "moved_to", bad)
+	return history.Open(ctx, path)
+}
+
 func (a *app) ready() {
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
@@ -239,7 +271,7 @@ func (a *app) ready() {
 	cfg, err := settings.Load(a.cfgPath)
 	switch {
 	case errors.Is(err, settings.ErrCorrupt):
-		bad, qerr := settings.Quarantine(a.cfgPath, time.Now())
+		bad, qerr := fsutil.Quarantine(a.cfgPath, time.Now())
 		if qerr != nil {
 			slog.Error("settings quarantine", "err", qerr)
 			a.cfgErr = "Settings were unreadable and could not be moved aside, so changes won't be saved."
@@ -256,7 +288,15 @@ func (a *app) ready() {
 	a.cfg = cfg
 	ctx, cancel := context.WithCancel(context.Background())
 	a.ctx, a.cancel = ctx, cancel
-	a.store, err = history.Open(ctx, filepath.Join(dir, "history.db"))
+	dbPath := filepath.Join(dir, "history.db")
+	a.store, err = history.Open(ctx, dbPath)
+	if history.IsCorrupt(err) {
+		a.store, err = a.recoverHistory(ctx, dbPath, err)
+		if a.store == nil && err == nil {
+			mygo.App.Quit()
+			return
+		}
+	}
 	if err != nil {
 		mygo.Dialog.Error(appName, "Cannot open history: "+err.Error())
 		mygo.App.Quit()

@@ -3,6 +3,7 @@
 package accel
 
 import (
+	"errors"
 	"runtime"
 	"strings"
 )
@@ -14,14 +15,32 @@ func Key(acc string) string {
 	if strings.TrimSpace(acc) == "" {
 		return ""
 	}
-	var mods [4]bool // Super, Ctrl, Alt, Shift
-	const (
-		superMod = iota
-		ctrlMod
-		altMod
-		shiftMod
-	)
-	key := ""
+	mods, key := parse(acc)
+	var parts []string
+	for i, names := range [4]string{"Super", "Ctrl", "Alt", "Shift"} {
+		if mods[i] {
+			parts = append(parts, names)
+		}
+	}
+	if key != "" {
+		if len([]rune(key)) == 1 {
+			key = strings.ToUpper(key)
+		}
+		parts = append(parts, key)
+	}
+	return strings.Join(parts, "+")
+}
+
+const (
+	superMod = iota
+	ctrlMod
+	altMod
+	shiftMod
+)
+
+// parse splits acc into its modifiers (Super, Ctrl, Alt, Shift) and the
+// lower-cased key, "" when there is none.
+func parse(acc string) (mods [4]bool, key string) {
 	for _, tok := range strings.Split(acc, "+") {
 		t := strings.ToLower(strings.TrimSpace(tok))
 		switch t {
@@ -44,17 +63,38 @@ func Key(acc string) string {
 			key = t
 		}
 	}
-	var parts []string
-	for i, names := range [4]string{"Super", "Ctrl", "Alt", "Shift"} {
-		if mods[i] {
-			parts = append(parts, names)
-		}
+	return mods, key
+}
+
+var (
+	ErrNoKey      = errors.New("Shortcut needs a key")
+	ErrNoModifier = errors.New("Shortcut needs Ctrl, Alt, Cmd or Super")
+	ErrReserved   = errors.New("That shortcut is reserved by the system")
+)
+
+// reserved holds canonical Key forms of system and editing shortcuts.
+var reserved = map[string]bool{}
+
+func init() {
+	for _, k := range strings.Fields(`Ctrl+A Ctrl+C Ctrl+V Ctrl+X Ctrl+Y Ctrl+Z Ctrl+Shift+Z Ctrl+Q Ctrl+W
+Super+A Super+C Super+V Super+X Super+Y Super+Z Super+Shift+Z Super+Q Super+W
+Super+tab Super+Shift+tab Super+space Alt+tab Alt+Shift+tab Alt+f4 Ctrl+Alt+delete`) {
+		reserved[k] = true
 	}
-	if key != "" {
-		if len([]rune(key)) == 1 {
-			key = strings.ToUpper(key)
-		}
-		parts = append(parts, key)
+}
+
+// Valid reports whether acc can be a global shortcut: a key plus at least
+// one of Super, Ctrl or Alt (Shift alone is not enough), and not a
+// system or editing shortcut.
+func Valid(acc string) error {
+	mods, key := parse(acc)
+	switch {
+	case key == "":
+		return ErrNoKey
+	case !mods[superMod] && !mods[ctrlMod] && !mods[altMod]:
+		return ErrNoModifier
+	case reserved[Key(acc)]:
+		return ErrReserved
 	}
-	return strings.Join(parts, "+")
+	return nil
 }

@@ -2,4 +2,6 @@
 
 package capture
 
-func frontOwner() Owner { return Owner{} }
+func noteFront() {}
+
+func clipOwners() []Owner { return nil }

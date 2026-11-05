@@ -3,6 +3,7 @@ package history_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,12 +284,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := src.WriteExport(ctx, &buf); err != nil {
 		t.Fatal(err)
 	}
-	f, err := history.DecodeExport(buf.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
 	dst := historytest.NewStore(t)
-	e, sn, d, err := dst.Import(ctx, f)
+	e, sn, d, err := dst.Import(ctx, bytes.NewReader(buf.Bytes()))
 	if err != nil || e != 3 || sn != 1 || d != 0 {
 		t.Fatalf("import = %d %d %d %v", e, sn, d, err)
 	}
@@ -305,7 +302,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if string(img.Image) != string(png) || len(img.Thumb) == 0 || img.Width != 6 {
 		t.Errorf("image not restored: %+v", img.Width)
 	}
-	e, sn, d, err = dst.Import(ctx, f)
+	e, sn, d, err = dst.Import(ctx, bytes.NewReader(buf.Bytes()))
 	if err != nil || e != 0 || sn != 0 || d != 4 {
 		t.Errorf("re-import = %d %d %d %v", e, sn, d, err)
 	}
@@ -317,13 +314,15 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecodeExportRejects(t *testing.T) {
+func TestImportRejectsForeignFiles(t *testing.T) {
+	ctx := context.Background()
 	for _, in := range []string{`{`, `{"format":"other","version":1}`, `{"format":"okibaclip-export","version":3}`} {
-		if _, err := history.DecodeExport([]byte(in)); err == nil {
-			t.Errorf("accepted %s", in)
+		e, sn, _, err := historytest.NewStore(t).Import(ctx, strings.NewReader(in))
+		if err == nil || e != 0 || sn != 0 {
+			t.Errorf("accepted %s: %d %d %v", in, e, sn, err)
 		}
 	}
-	if _, err := history.DecodeExport([]byte(`{"format":"okibaclip-export","version":1,"entries":[],"snippets":[]}`)); err != nil {
+	if _, _, _, err := historytest.NewStore(t).Import(ctx, strings.NewReader(`{"format":"okibaclip-export","version":1,"entries":[],"snippets":[]}`)); err != nil {
 		t.Error(err)
 	}
 }
@@ -331,14 +330,14 @@ func TestDecodeExportRejects(t *testing.T) {
 func TestImportReclassifiesAndRejectsInvalid(t *testing.T) {
 	s := historytest.NewStore(t)
 	ctx := context.Background()
-	f := history.ExportFile{Format: history.ExportFormat, Version: history.ExportVersion, Entries: []history.ExportEntry{
+	f := []history.ExportEntry{
 		{Kind: history.KindColor, Text: "red"},
 		{Kind: history.KindLink, Text: "file:///etc/passwd"},
 		{Kind: history.KindText, Text: strings.Repeat("a", history.MaxTextBytes+1)},
 		{Kind: history.KindImage, Image: []byte("junk")},
 		{Kind: history.KindText, Text: "future", UsedAt: time.Now().Add(1000 * time.Hour).UnixMilli()},
-	}}
-	entries, _, _, err := s.Import(ctx, f)
+	}
+	entries, _, _, err := s.Import(ctx, historytest.Export(t, f, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,9 +364,9 @@ func TestImportReclassifiesAndRejectsInvalid(t *testing.T) {
 func TestImportTwiceKeepsUseCount(t *testing.T) {
 	s := historytest.NewStore(t)
 	ctx := context.Background()
-	f := history.ExportFile{Format: history.ExportFormat, Version: history.ExportVersion, Entries: []history.ExportEntry{{Kind: history.KindText, Text: "x", UseCount: 5}}}
+	f := []history.ExportEntry{{Kind: history.KindText, Text: "x", UseCount: 5}}
 	for range 2 {
-		if _, _, _, err := s.Import(ctx, f); err != nil {
+		if _, _, _, err := s.Import(ctx, historytest.Export(t, f, nil)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -435,8 +434,8 @@ func TestWriteExportStreamsAllEntries(t *testing.T) {
 	if err := s.WriteExport(context.Background(), &buf); err != nil {
 		t.Fatal(err)
 	}
-	f, err := history.DecodeExport(buf.Bytes())
-	if err != nil {
+	var f struct{ Entries []history.ExportEntry }
+	if err := json.Unmarshal(buf.Bytes(), &f); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.Entries) != 450 {

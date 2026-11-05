@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"hash/crc32"
 	"image"
 	"image/png"
@@ -76,4 +77,25 @@ func PNGHeader(w, h int) []byte {
 	out = append(out, chunk...)
 	out = binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(chunk))
 	return out
+}
+
+// Export encodes entries and snippets as a current-version export file.
+func Export(t testing.TB, entries []history.ExportEntry, snippets []history.ExportSnippet) *bytes.Reader {
+	t.Helper()
+	if entries == nil {
+		entries = []history.ExportEntry{}
+	}
+	if snippets == nil {
+		snippets = []history.ExportSnippet{}
+	}
+	b, err := json.Marshal(struct {
+		Format   string                  `json:"format"`
+		Version  int                     `json:"version"`
+		Entries  []history.ExportEntry   `json:"entries"`
+		Snippets []history.ExportSnippet `json:"snippets"`
+	}{history.ExportFormat, history.ExportVersion, entries, snippets})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.NewReader(b)
 }

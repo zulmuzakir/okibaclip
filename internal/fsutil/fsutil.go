@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // WriteFileAtomic replaces path with data at mode 0600. It writes a temp
@@ -48,4 +49,13 @@ func WriteFileAtomicFunc(path string, write func(io.Writer) error) error {
 		return err
 	}
 	return nil
+}
+
+// Quarantine renames path to path+".bad-"+now.Format("20060102-150405") and returns the new path.
+func Quarantine(path string, now time.Time) (string, error) {
+	bad := path + ".bad-" + now.Format("20060102-150405")
+	if err := os.Rename(path, bad); err != nil {
+		return "", err
+	}
+	return bad, nil
 }

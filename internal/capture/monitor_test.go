@@ -27,7 +27,7 @@ type fakeClip struct {
 	readErrs    []error
 	reads       int
 	formatReads int // Formats and NativeFormats calls
-	owner       Owner
+	owners      []Owner
 	onRead      func() // runs in Read with mu released, before data is returned
 }
 
@@ -48,7 +48,7 @@ func (f *fakeClip) NativeFormats() []string {
 	f.formatReads++
 	return f.native
 }
-func (f *fakeClip) Owner() Owner { f.mu.Lock(); defer f.mu.Unlock(); return f.owner }
+func (f *fakeClip) Owners() []Owner { f.mu.Lock(); defer f.mu.Unlock(); return f.owners }
 func (f *fakeClip) ReadFormat(format transfer.Format) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -399,7 +399,7 @@ func TestMonitorRetriesAfterStoreError(t *testing.T) {
 
 func TestMonitorRecordsSourceApp(t *testing.T) {
 	f := newMonFixture(t, true)
-	f.clip.owner = Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack", Path: "/Applications/Slack.app"}
+	f.clip.owners = []Owner{Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack", Path: "/Applications/Slack.app"}}
 	f.clip.setText("hello")
 	f.tick(t)
 	l, err := f.store.List(f.ctx, history.Filter{Tab: "all"})
@@ -422,17 +422,39 @@ func TestMonitorSkipsIgnoredApp(t *testing.T) {
 	if err := f.m.SetConfig(s); err != nil {
 		t.Fatal(err)
 	}
-	f.clip.owner = Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack"}
+	f.clip.owners = []Owner{Owner{App: "com.tinyspeck.slackmacgap", Name: "Slack"}}
 	f.clip.setText("from slack")
 	f.tick(t)
 	if l := f.list(t); len(l) != 0 {
 		t.Errorf("recorded %v", l)
 	}
-	f.clip.owner = Owner{App: "org.mozilla.firefox", Name: "Firefox"}
+	f.clip.owners = []Owner{Owner{App: "org.mozilla.firefox", Name: "Firefox"}}
 	f.clip.setText("from firefox")
 	f.tick(t)
 	if l := f.list(t); !slices.Equal(l, []string{"from firefox"}) {
 		t.Errorf("list = %v", l)
+	}
+}
+
+func TestMonitorSkipsWhenAnyOwnerIgnored(t *testing.T) {
+	f := newMonFixture(t, true)
+	s := settings.Default()
+	s.IgnoreApps = []string{"com.agilebits.onepassword7"}
+	if err := f.m.SetConfig(s); err != nil {
+		t.Fatal(err)
+	}
+	f.clip.owners = []Owner{{App: "org.mozilla.firefox"}, {App: "com.agilebits.onepassword7"}}
+	f.clip.setText("secret")
+	f.tick(t)
+	if l := f.list(t); len(l) != 0 {
+		t.Errorf("recorded %v", l)
+	}
+	f.clip.owners = []Owner{{App: "org.mozilla.firefox", Name: "Firefox"}}
+	f.clip.setText("fine")
+	f.tick(t)
+	l, err := f.store.List(f.ctx, history.Filter{Tab: "all"})
+	if err != nil || len(l) != 1 || l[0].SourceApp != "org.mozilla.firefox" {
+		t.Errorf("list = %v, %v", l, err)
 	}
 }
 

@@ -55,6 +55,8 @@ func TestClassify(t *testing.T) {
 	secretPat := []*regexp.Regexp{regexp.MustCompile(`^\d{16}$`)}
 	card := richData(textRep("4111111111111111"))
 	partial := richData(textRep("4111 1111"))
+	sixDigits := richData(textRep("123456\n"))
+	sixPat := []*regexp.Regexp{regexp.MustCompile(`^\d{6}$`)}
 
 	cases := []tc{
 		{"text", textData, def, nil, history.KindText, true, ""},
@@ -73,6 +75,7 @@ func TestClassify(t *testing.T) {
 		{"files off falls to text", filesAndText, noFiles, nil, history.KindText, true, ""},
 		{"ignore pattern full match", card, def, secretPat, "", false, "matches ignore pattern"},
 		{"ignore pattern is anchored by the regexp", partial, def, secretPat, history.KindText, true, ""},
+		{"ignore pattern matches trimmed text", sixDigits, def, sixPat, "", false, "matches ignore pattern"},
 	}
 	for _, c := range cases {
 		got, reason, ok := Classify(c.data, c.data.Formats(), c.set, c.pats)

@@ -201,9 +201,6 @@ func (m *Monitor) prune(ctx context.Context) {
 	if err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)
 	} else if n > 0 {
-		if err := m.store.Compact(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("compact", "err", err)
-		}
 		m.onChange()
 	}
 }
@@ -305,12 +302,18 @@ func (m *Monitor) tick(ctx context.Context) {
 		m.retryPending(update)
 		return
 	}
-	owner := m.src.Owner()
-	if ignoredApp(owner, cfg.IgnoreApps) {
-		slog.Info("capture skipped", "reason", "ignored app", "app", owner.App)
-		m.takeIgnore()
-		update()
-		return
+	owners := m.src.Owners()
+	for _, o := range owners {
+		if ignoredApp(o, cfg.IgnoreApps) {
+			slog.Info("capture skipped", "reason", "ignored app", "app", o.App)
+			m.takeIgnore()
+			update()
+			return
+		}
+	}
+	var owner Owner
+	if len(owners) > 0 {
+		owner = owners[0]
 	}
 	if cfg.SkipSensitive && IsSensitive(m.src.NativeFormats(), formats, m.src.ReadFormat) {
 		slog.Info("capture skipped", "reason", "sensitive")

@@ -11,8 +11,8 @@ The user-data folder holds `history.db` and `settings.json`, and Settings › Ab
 | OS | Folder |
 |---|---|
 | macOS | `~/Library/Application Support/okibaclip` |
-| Windows | `%AppData%\okibaclip` |
-| Linux | `$XDG_CONFIG_HOME/okibaclip` (usually `~/.config/okibaclip`) |
+| Windows | `%LocalAppData%\okibaclip` |
+| Linux | `$XDG_DATA_HOME/okibaclip` (usually `~/.local/share/okibaclip`) |
 
 ## Search
 

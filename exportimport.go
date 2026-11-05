@@ -26,27 +26,11 @@ func (a *app) importFrom(ctx context.Context, path string, l history.Limits) (en
 		return 0, 0, 0, 0, err
 	}
 	defer fh.Close()
-	b, err := io.ReadAll(io.LimitReader(fh, history.MaxImportSize+1))
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	if len(b) > history.MaxImportSize {
-		return 0, 0, 0, 0, fmt.Errorf("file is larger than %d MiB", history.MaxImportSize>>20)
-	}
-	f, err := history.DecodeExport(b)
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	entries, snippets, dupes, err = a.store.Import(ctx, f)
+	entries, snippets, dupes, err = a.store.Import(ctx, fh)
 	if err != nil {
 		return
 	}
 	pruned, err = a.store.Prune(ctx, l, time.Now())
-	if err == nil && pruned > 0 {
-		if cerr := a.store.Compact(ctx); cerr != nil {
-			slog.Error("compact", "err", cerr)
-		}
-	}
 	return
 }
 

@@ -19,3 +19,16 @@ func ignoredApp(o Owner, ignore []string) bool {
 	}
 	return false
 }
+
+// appendOwner appends o unless it is empty or its App is already in out.
+func appendOwner(out []Owner, o Owner) []Owner {
+	if o.App == "" {
+		return out
+	}
+	for _, x := range out {
+		if x.App == o.App {
+			return out
+		}
+	}
+	return append(out, o)
+}

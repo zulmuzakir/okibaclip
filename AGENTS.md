@@ -39,7 +39,7 @@ flowchart LR
 - **CLI (`app.command`):** a second launch forwards `--toggle|--show|--hide|--settings|--pause|--resume|--quit` to the running instance. A bare launch shows the panel.
 - **Export/import (`exportimport.go`, `internal/history/export.go`):**
   - Writes format `okibaclip-export`, version 2; version 1 files still import.
-  - Imports are capped at 512 MiB (`MaxImportSize`).
+  - Export pages by content bytes and import streams one entry at a time in bounded batches; a single JSON value over 128 MiB is rejected.
 
 ## Key Directories
 
@@ -109,7 +109,7 @@ Format with `gofmt`. There is no other linter.
 - `panel.go`, `panel_snippets.go`: panel UI (search, tabs, list, preview, context menu, snippet editor).
 - `copy.go`: clipboard write-back and suppression.
 - `internal/capture/monitor.go`, `classify.go`: the capture pipeline.
-- `internal/history/store.go`: versioned migrations (`migrations`, schema v3), `Capture` upsert, `Prune` (count, age and storage budget) and `Compact`, search.
+- `internal/history/store.go`: versioned migrations (`migrations`, schema v3), `Capture` upsert, `Prune` (count, age and storage budget), search. Deletes run with `secure_delete` on and compact the file themselves.
 - `internal/capture/owner_*.go`: source-app lookup per OS; `wayland_linux.go`: `wl-paste` capture on data-control compositors.
 - `internal/paste/`: opt-in paste keystroke; `internal/placeholder/`: snippet placeholders.
 - `go.mod`: Go 1.27.3; `tool github.com/egoist/mygo/cmd/mygo` (this is what enables `go tool mygo`).

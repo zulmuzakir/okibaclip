@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestWriteFileAtomicFuncFailureKeepsOldFile(t *testing.T) {
@@ -67,5 +68,25 @@ func TestWriteFileAtomicReplacesWithMode0600(t *testing.T) {
 	ents, _ := os.ReadDir(dir)
 	if len(ents) != 1 {
 		t.Errorf("leftover files: %v", ents)
+	}
+}
+
+func TestQuarantineMovesCorruptFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	os.WriteFile(p, []byte(`{nope`), 0o600)
+	now := time.Date(2026, 11, 5, 14, 30, 12, 0, time.UTC)
+	got, err := Quarantine(p, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := p + ".bad-20261105-143012"; got != want {
+		t.Errorf("Quarantine = %q; want %q", got, want)
+	}
+	b, err := os.ReadFile(got)
+	if err != nil || string(b) != `{nope` {
+		t.Errorf("quarantined file = %q, %v", b, err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("original still present: %v", err)
 	}
 }
