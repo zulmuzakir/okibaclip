@@ -54,7 +54,9 @@ macOS 15.4+ may ask whether Okiba Clip may read the pasteboard from other apps; 
 
 ## Release
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds every platform and attaches the installers to a draft release. Review the draft and publish it by hand. Auto-update is not configured.
+Bump `version` in `mygo.json` and add its `## <version>` section to `CHANGELOG.md` (the release notes), then push the matching `v*` tag. `.github/workflows/release.yml` checks that the tag matches the version, builds every platform and uploads the installers and signed updates to a draft release. Review the draft and publish it by hand: installed apps see the update only once it is published.
+
+Installed apps check for updates once a day and from the tray's "Check for Updates…" or Settings › About. The `.deb` installs into `/opt` and is updated by the package manager instead. Updates are signed with the key in the `MYGO_UPDATER_PRIVATE_KEY` repository secret; its public half is `updates.publicKey` in `mygo.json`.
 
 ## Unsigned builds
 

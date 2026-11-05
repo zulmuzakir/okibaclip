@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
 	"github.com/egoist/mygo/ui"
 
 	"okibaclip/internal/history"
@@ -35,6 +36,10 @@ type settingsState struct {
 	stats      string
 	toggleCmd  string
 	editing    string
+	// The updater plugin's preferences and last result (syncUpdateUI).
+	autoCheck    bool
+	autoInstall  bool
+	updateStatus string
 }
 
 var settingsTabs = []string{"General", "History", "Data", "About"}
@@ -75,6 +80,24 @@ func (a *app) syncSettingsUI() {
 			exe = "okibaclip"
 		}
 		s.toggleCmd = shellQuote(exe) + " --toggle"
+	}
+	a.syncUpdateUI()
+}
+
+// syncUpdateUI copies the updater's preferences and last check into the form.
+func (a *app) syncUpdateUI() {
+	if !a.canUpdate {
+		return
+	}
+	s := &a.settingsUI
+	s.autoCheck, s.autoInstall = updater.AutomaticChecks(), updater.AutomaticDownloads()
+	switch v, last := updater.AvailableVersion(), updater.LastCheck(); {
+	case v != "":
+		s.updateStatus = "Version " + v + " is available."
+	case last.IsZero():
+		s.updateStatus = "Not checked yet."
+	default:
+		s.updateStatus = "Up to date. Last checked " + last.Local().Format("Jan 2, 15:04") + "."
 	}
 }
 
@@ -492,6 +515,7 @@ func (a *app) aboutSection(c *ui.Context) {
 			ui.Text(c, "Version "+mygo.App.Version()).FontSize(12).TextColor(t.TextMuted)
 		})
 	})
+	a.updatesGroup(c)
 	settingsGroup(c, "Status", func() {
 		v, col := "Running", t.TextMuted
 		if a.trayErr != "" {
@@ -516,6 +540,36 @@ func (a *app) aboutSection(c *ui.Context) {
 			settingRow(c, "Paste from Other Apps", "If macOS asks, choose Always Allow for "+appName+" (System Settings › Privacy & Security › Paste from Other Apps).", "", nil)
 		})
 	}
+}
+
+// updatesGroup shows the updater's preferences, or why this copy can't update.
+func (a *app) updatesGroup(c *ui.Context) {
+	s := &a.settingsUI
+	settingsGroup(c, "Updates", func() {
+		if !a.canUpdate {
+			why := "This copy can't replace itself where it is installed. Installs from a package manager, such as the .deb, update through it."
+			if mygo.IsDev() {
+				why = "Development builds don't update themselves."
+			}
+			settingRow(c, "Automatic updates", why, "", nil)
+			return
+		}
+		settingRow(c, "Check automatically", "Checks for a new version once a day.", "", func() {
+			if ui.Switch(c, &s.autoCheck).Label("Check automatically").Changed() {
+				updater.SetAutomaticChecks(s.autoCheck)
+			}
+		})
+		settingRow(c, "Install automatically", "Downloads updates found in the background without asking; they run at the next launch.", "", func() {
+			if ui.Switch(c, &s.autoInstall).Label("Install automatically").Disabled(!s.autoCheck).Changed() {
+				updater.SetAutomaticDownloads(s.autoInstall)
+			}
+		})
+		settingRow(c, "Check for updates", s.updateStatus, "", func() {
+			if softButton(c, "Check Now", c.Theme().Text).Clicked() {
+				updater.CheckForUpdates()
+			}
+		})
+	})
 }
 
 // patternErrText words the ignore-pattern errors for the settings form.

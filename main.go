@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater/native"
 )
 
 const (
@@ -25,6 +26,9 @@ func main() {
 	if base, err := dataBase(); err == nil {
 		mygo.App.SetPath(mygo.PathUserData, filepath.Join(base, dataDirName))
 	}
+	// Update window, background checks and updater.json (in PathUserData);
+	// releases and their signing key are set by "updates" in mygo.json.
+	mygo.Use(native.Plugin)
 	a := newApp()
 	a.waylandMode = configureLinuxBackend()
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)

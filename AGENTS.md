@@ -41,6 +41,10 @@ flowchart LR
 - **Export/import (`exportimport.go`, `internal/history/export.go`):**
   - Writes format `okibaclip-export`, version 2; version 1 files still import.
   - Export pages by content bytes and import streams one entry at a time in bounded batches; a single JSON value over 128 MiB is rejected.
+- **Updates (`mygo/plugins/updater/native`):**
+  - `main.go` registers the plugin with `mygo.Use` before `Run`. It checks 10 s after launch and then daily, shows the update window, keeps `updater.json` in the data folder and installs signed releases from GitHub (`updates` in `mygo.json`).
+  - `a.canUpdate` is `mygo.Updater.Enabled()` at launch. It is false for dev builds, unsigned local builds and the `.deb` in `/opt`. Only when it is true does the tray get "Check for Updates…" and Settings › About show the update toggles. The `updater` package panics unless the plugin was used, so call it only behind `a.canUpdate`.
+  - Each release needs a `## <version>` section in `CHANGELOG.md`, which becomes the release notes.
 
 ## Key Directories
 
@@ -114,8 +118,8 @@ Format with `gofmt`. There is no other linter.
 - `internal/capture/owner_*.go`: source-app lookup per OS; `wayland_linux.go`: `wl-paste` capture on data-control compositors.
 - `internal/paste/`: opt-in paste keystroke; `internal/placeholder/`: snippet placeholders.
 - `go.mod`: Go 1.27.3; `tool github.com/egoist/mygo/cmd/mygo` (this is what enables `go tool mygo`).
-- `mygo.json`: name, identifier, version (bump it to match release tags; tags don't set artifact versions), `LSUIElement`, Linux deb deps (`libayatana-appindicator3-1`, `webview: false`).
-- `.github/workflows/ci.yml`, `release.yml`: CI and tag-driven (`v*`) draft releases.
+- `mygo.json`: name, identifier, version (bump it to match release tags; tags don't set artifact versions, and installed apps compare against it), `updates` (public key and GitHub repo of the update feed), `LSUIElement`, Linux deb deps (`libayatana-appindicator3-1`, `webview: false`).
+- `.github/workflows/ci.yml`, `release.yml`: CI and tag-driven (`v*`) draft releases. `release.yml` runs `mygo build -upload` with the `MYGO_UPDATER_PRIVATE_KEY` secret. Installed apps see an update only after the draft is published.
 
 ## Runtime/Tooling Preferences
 

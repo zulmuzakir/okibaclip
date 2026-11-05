@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
@@ -175,6 +176,9 @@ type app struct {
 	waylandCapture bool
 	pasteOK        bool
 	pasteNote      string
+	// canUpdate is mygo.Updater.Enabled at launch: a release build that can
+	// write where it is installed (not a dev build or a .deb in /opt).
+	canUpdate bool
 
 	// Seams for tests.
 	async          func(func())
@@ -413,6 +417,10 @@ func (a *app) finishReady() {
 		a.hide()
 	})
 
+	a.canUpdate = mygo.Updater.Enabled()
+	if a.canUpdate {
+		updater.OnChange(func() { a.postSettings(a.syncUpdateUI) })
+	}
 	a.registerShortcut()
 	a.setupTray()
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
 
 	"okibaclip/internal/history"
 )
@@ -100,7 +101,11 @@ func (a *app) buildTrayMenu() *mygo.Menu {
 		&mygo.MenuItem{Label: "Ignore Next Copy", Click: func(*mygo.MenuItem, *mygo.Window) { a.mon.IgnoreNext() }},
 		&mygo.MenuItem{Label: "Clear History…", Click: func(*mygo.MenuItem, *mygo.Window) { a.confirmClear(nil) }},
 		mygo.Separator(),
-		&mygo.MenuItem{Label: "Settings…", Click: func(*mygo.MenuItem, *mygo.Window) { a.openSettings() }},
+		&mygo.MenuItem{Label: "Settings…", Click: func(*mygo.MenuItem, *mygo.Window) { a.openSettings() }})
+	if a.canUpdate {
+		items = append(items, updater.MenuItem())
+	}
+	items = append(items,
 		&mygo.MenuItem{Label: "Open at Login", Type: mygo.MenuItemCheckbox, ID: "login", Checked: mygo.App.OpenAtLogin(),
 			Click: func(it *mygo.MenuItem, _ *mygo.Window) {
 				if err := mygo.App.SetOpenAtLogin(it.IsChecked()); err != nil {

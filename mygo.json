@@ -3,6 +3,10 @@
   "slug": "okibaclip",
   "identifier": "io.github.zulmuzakir.okibaclip",
   "version": "0.1.0",
+  "updates": {
+    "publicKey": "IgLBH5dIKDa8rHFNlAa79rnjpCoQ5hWfQ898yx8dOJg=",
+    "github": "zulmuzakir/okibaclip"
+  },
   "out": "build",
   "macos": { "infoPlist": { "LSUIElement": true } },
   "linux": { "webview": false, "depends": ["libayatana-appindicator3-1"], "categories": ["Utility"] }
