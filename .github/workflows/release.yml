@@ -8,7 +8,13 @@ permissions:
   contents: write # the draft release, and the uploads to it
 
 jobs:
+  # Vet and test on every OS first: nothing is created or uploaded for a
+  # commit that fails CI.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   draft-release:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
