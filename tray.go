@@ -14,7 +14,7 @@ import (
 func (a *app) setupTray() {
 	t, err := mygo.NewTray(mygo.TrayOptions{
 		ID:             "main",
-		Icon:           trayIcon(false),
+		Icon:           trayIcon(false, false),
 		IconIsTemplate: isDarwin,
 		ToolTip:        appName,
 	})
@@ -24,6 +24,14 @@ func (a *app) setupTray() {
 		return
 	}
 	a.tray = t
+	if !isDarwin && !isLinux {
+		// The Windows icon is drawn per taskbar color; macOS tints its
+		// template and Linux's icon reads on any panel.
+		if t.Dark() {
+			a.setTrayIcon(false)
+		}
+		t.OnAppearanceChange(func() { a.setTrayIcon(a.trayPaused) })
+	}
 	if isLinux {
 		// AppIndicator is menu-only; the menu is installed for good.
 		t.SetMenu(a.buildTrayMenu())
@@ -131,11 +139,7 @@ func (a *app) refreshTray() {
 	}
 	a.tray.SetToolTip(tip)
 	if paused != a.trayPaused {
-		if err := a.tray.SetIcon(trayIcon(paused), isDarwin); err != nil {
-			slog.Error("tray icon", "err", err)
-		} else {
-			a.trayPaused = paused
-		}
+		a.setTrayIcon(paused)
 	}
 	if !isLinux {
 		return
@@ -150,4 +154,13 @@ func (a *app) refreshTray() {
 			}
 		})
 	})
+}
+
+// setTrayIcon shows the paused or normal icon for the bar's current color.
+func (a *app) setTrayIcon(paused bool) {
+	if err := a.tray.SetIcon(trayIcon(paused, a.tray.Dark()), isDarwin); err != nil {
+		slog.Error("tray icon", "err", err)
+		return
+	}
+	a.trayPaused = paused
 }

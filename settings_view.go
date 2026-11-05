@@ -504,12 +504,20 @@ func (a *app) dataSection(c *ui.Context) {
 	})
 }
 
+// aboutIcon is the app icon's tile, drawn at 48 DIPs from 96 pixels.
+// DecodeBitmap only builds pixels, so it can run at package init.
+var aboutIcon = func() *ui.Bitmap {
+	b, err := ui.DecodeBitmap(brandPNG("about"))
+	if err != nil {
+		panic(err) // embedded at build time
+	}
+	return b
+}()
+
 func (a *app) aboutSection(c *ui.Context) {
 	t := c.Theme()
 	ui.Row(c).Padding(16).Gap(14).AlignItems(ui.Center).Radius(12).Background(t.Text.Alpha(0.04)).Children(func() {
-		ui.Box(c).Size(48, 48).Radius(12).Background(t.Accent.Alpha(0.18)).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
-			ui.Icon(c, iconClipboard).Size(26, 26).TextColor(t.Accent)
-		})
+		ui.Image(c, aboutIcon).Size(48, 48)
 		ui.Column(c).Gap(2).Children(func() {
 			ui.Text(c, appName).Bold().FontSize(16)
 			ui.Text(c, "Version "+mygo.App.Version()).FontSize(12).TextColor(t.TextMuted)

@@ -50,14 +50,15 @@ flowchart LR
 
 | Path | Purpose |
 |---|---|
-| `/` (package `main`) | App wiring and all UI: `main.go` (entry point), `app.go` (state, lifecycle), `panel.go` (view), `panel_list.go` (history rows), `panel_preview.go` (preview pane, entry menu), `panel_snippets.go` (snippets tab and editor), `panel_edit.go`, `actions.go` (copy, delete, undo, pin and toasts), `shortcut.go` (global hotkeys), `widgets.go` (shared buttons, banners, settings rows), `settings_view.go`, `exportimport.go`, `tray*.go`, `copy.go`, `format.go`, `icons.go` (Lucide icons), `platform.go` |
+| `/` (package `main`) | App wiring and all UI: `main.go` (entry point), `app.go` (state, lifecycle), `panel.go` (view), `panel_list.go` (history rows), `panel_preview.go` (preview pane, entry menu), `panel_snippets.go` (snippets tab and editor), `panel_edit.go`, `actions.go` (copy, delete, undo, pin and toasts), `shortcut.go` (global hotkeys), `widgets.go` (shared buttons, banners, settings rows), `settings_view.go`, `exportimport.go`, `tray*.go` (`trayicon.go` picks the tray PNG per OS, taskbar color and pause), `copy.go`, `format.go`, `icons.go` (Lucide icons), `platform.go` |
 | `internal/capture/` | Clipboard polling, classification, sensitivity checks, per-OS change tokens |
 | `internal/history/` | SQLite store (`store.go`), entries/thumbnails (`entry.go`), snippets, export format |
 | `internal/history/historytest/` | Test fixtures: `T0`, `NewStore(t)`, `Add`, `PNG`, `Texts` |
 | `internal/settings/` | `settings.json` model, `Normalize` clamping, atomic 0600 `Save` |
 | `internal/search/` | Query parsing, word scoring (whole word > word start > substring > fuzzy), highlight ranges |
 | `internal/transform/` | Text transforms offered in the context menu |
-| `resources/` | `icon.png`; ships with every build (platform subdirectories like `resources/linux-amd64/` ship only with that platform) |
+| `resources/` | `icon.png` (the app icon: macOS `.icns`, Windows executable, Linux desktop entry, update window) and `icon-dev.png` (the dark-tile icon of `mygo dev` builds, not shipped); ships with every build (platform subdirectories like `resources/linux-amd64/` ship only with that platform) |
+| `brand/` | Embedded tray icons (`template` black for macOS to tint; `light`/`dark` for the Windows taskbar's color; `neutral` with opaque rows for Linux panels; each with `-paused`) and the About icon. `brand/src/*.svg` are their sources: re-render a PNG at the size it has now (36 px template, 32 px tray, 96 px about, 1024 px `resources/icon*.png`) |
 | `.agents/skills/mygo-maintenance/` | mygo UI/threading rules; read before UI work |
 | `build/` | Git-ignored build output; may hold stale binaries |
 
