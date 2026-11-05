@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,9 +24,20 @@ import (
 // `wl-paste --watch` process prints a line on every selection change; those
 // lines are the change token.
 type waylandSource struct {
-	bin string
-	tok atomic.Uint64
+	bin   string
+	tok   atomic.Uint64
+	types struct {
+		mu   sync.Mutex
+		tok  uint64
+		list []string
+		ok   bool
+	}
 }
+
+// maxWaylandBytes caps one clipboard read; larger data is refused, not truncated.
+const maxWaylandBytes = 64 << 20
+
+var errWaylandTooLarge = errors.New("wl-paste: clipboard data over 64 MiB")
 
 // NewWaylandSource returns a Source backed by wl-paste, or an error when
 // wl-paste is missing or the compositor has no data-control.
@@ -142,8 +154,15 @@ func (w *waylandSource) Token() (uint64, bool) { return w.tok.Load(), true }
 
 func (w *waylandSource) Owner() Owner { return Owner{} }
 
-// NativeFormats lists the MIME types the selection offers.
+// NativeFormats lists the MIME types the selection offers. The list is
+// cached per change token, so reads of an unchanged selection skip wl-paste.
 func (w *waylandSource) NativeFormats() []string {
+	t := w.tok.Load()
+	w.types.mu.Lock()
+	defer w.types.mu.Unlock()
+	if w.types.ok && w.types.tok == t {
+		return w.types.list
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, w.bin, "--list-types").Output()
@@ -156,6 +175,7 @@ func (w *waylandSource) NativeFormats() []string {
 			types = append(types, l)
 		}
 	}
+	w.types.tok, w.types.list, w.types.ok = t, types, true
 	return types
 }
 
@@ -223,7 +243,11 @@ func (w *waylandSource) read(f transfer.Format, types []string) ([]byte, error) 
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	b, rerr := io.ReadAll(io.LimitReader(out, 64<<20))
+	b, rerr := io.ReadAll(io.LimitReader(out, maxWaylandBytes+1))
+	if rerr == nil && len(b) > maxWaylandBytes {
+		cancel() // kills wl-paste; the pipe drains below
+		rerr = errWaylandTooLarge
+	}
 	io.Copy(io.Discard, out)
 	if err := cmd.Wait(); err != nil && rerr == nil {
 		rerr = err

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +34,7 @@ type settingsState struct {
 	toast      string
 	stats      string
 	toggleCmd  string
+	editing    string
 }
 
 var settingsTabs = []string{"General", "History", "Data", "About"}
@@ -59,8 +60,9 @@ func (a *app) syncSettingsUI() {
 	s.storageMB = float64(a.cfg.MaxStorageMB)
 	s.ignoreApps = strings.Join(a.cfg.IgnoreApps, "\n")
 	s.poll = pollLabel(a.cfg.PollMillis)
-	s.patterns = strings.Join(a.cfg.IgnorePatterns, "\n")
-	s.patErr = ""
+	if s.patErr == "" {
+		s.patterns = strings.Join(a.cfg.IgnorePatterns, "\n")
+	}
 	s.shortcut = a.shortcut
 	if a.cfg.Shortcut != "" {
 		s.shortcut = a.cfg.Shortcut
@@ -109,7 +111,7 @@ func (a *app) openSettings() {
 				return
 			}
 			e.PreventDefault()
-			a.settingsWin.Hide()
+			a.closeSettings()
 		})
 	}
 	a.hide()
@@ -121,21 +123,27 @@ func (a *app) openSettings() {
 func (a *app) refreshStats() {
 	a.statsGen++
 	gen := a.statsGen
+	// Config and paths are read here, on the main thread; the goroutine below
+	// must not touch a.cfg or a.dataDir.
+	limit := humanSize(int64(a.cfg.MaxStorageMB) << 20)
+	dbPath := filepath.Join(a.dataDir, "history.db")
 	a.async(func() {
 		e, p, s, err := a.store.Counts(a.ctx)
 		if err != nil {
+			slog.Warn("stats", "err", err)
 			return
 		}
 		u, err := a.store.Usage(a.ctx)
 		if err != nil {
+			slog.Warn("stats", "err", err)
 			return
 		}
 		apps, err := a.store.SourceApps(a.ctx, 8)
 		if err != nil {
+			slog.Warn("stats", "err", err)
 			return
 		}
-		size := humanSize(fileSize(filepath.Join(a.dataDir, "history.db")))
-		limit := humanSize(int64(a.cfg.MaxStorageMB) << 20)
+		size := humanSize(fileSize(dbPath))
 		a.postSettings(func() {
 			if gen != a.statsGen {
 				return
@@ -147,6 +155,7 @@ func (a *app) refreshStats() {
 }
 
 // applySettings validates the form, saves it and pushes it to the monitor.
+// The field being typed in (s.editing) takes its saved value and keeps its draft.
 func (a *app) applySettings() {
 	s := &a.settingsUI
 	f := s.form
@@ -159,19 +168,31 @@ func (a *app) applySettings() {
 		}
 	}
 	lines := strings.Split(s.patterns, "\n")
-	if _, err := settings.CompilePatterns(lines); err != nil {
-		s.patErr = patternErrText(err)
+	kept, _, errs := settings.CompilePatterns(lines)
+	if len(errs) > 0 {
+		s.patErr = patternErrText(errs)
 		f.IgnorePatterns = a.cfg.IgnorePatterns
 	} else {
 		s.patErr = ""
-		f.IgnorePatterns = lines
+		f.IgnorePatterns = kept
 	}
 	f.Shortcut = a.cfg.Shortcut
 	f.FirstRunDone = a.cfg.FirstRunDone
 	f.Normalize()
+	f = savedFor(f, a.cfg, s.editing)
 	s.form = f
-	s.maxEntries, s.retention, s.imageMB = float64(f.MaxEntries), float64(f.RetentionDays), float64(f.MaxImageMB)
-	s.storageMB = float64(f.MaxStorageMB)
+	if s.editing != "maxEntries" {
+		s.maxEntries = float64(f.MaxEntries)
+	}
+	if s.editing != "retention" {
+		s.retention = float64(f.RetentionDays)
+	}
+	if s.editing != "imageMB" {
+		s.imageMB = float64(f.MaxImageMB)
+	}
+	if s.editing != "storageMB" {
+		s.storageMB = float64(f.MaxStorageMB)
+	}
 	a.cfg = f
 	if a.cfgPath != "" {
 		if err := settings.Save(a.cfgPath, f); err != nil {
@@ -180,11 +201,59 @@ func (a *app) applySettings() {
 	}
 	if a.mon != nil {
 		if err := a.mon.SetConfig(f); err != nil {
-			s.patErr = patternErrText(err)
+			slog.Error("apply settings", "err", err)
 		}
 	}
 	a.refreshTray()
 	a.reload()
+}
+
+// commitOnBlur applies a destructive field when it loses focus or Enter is
+// pressed; while focused, typing only edits the draft.
+func (a *app) commitOnBlur(key string, el ui.Element) {
+	s := &a.settingsUI
+	submitted, focused, changed := el.Submitted(), el.Focused(), el.Changed()
+	switch {
+	case submitted:
+		s.editing = ""
+		a.applySettings()
+	case focused:
+		s.editing = key
+	case s.editing == key:
+		s.editing = ""
+		a.applySettings()
+	case changed: // stepper buttons, which don't take focus
+		a.applySettings()
+	}
+}
+
+// closeSettings commits a field still being typed in, then hides the window.
+func (a *app) closeSettings() {
+	if a.settingsUI.editing != "" {
+		a.settingsUI.editing = ""
+		a.applySettings()
+	}
+	a.settingsWin.Hide()
+}
+
+// savedFor returns f with the field named by key reset to its value in saved;
+// an empty or unknown key changes nothing.
+func savedFor(f, saved settings.Settings, key string) settings.Settings {
+	switch key {
+	case "maxEntries":
+		f.MaxEntries = saved.MaxEntries
+	case "retention":
+		f.RetentionDays = saved.RetentionDays
+	case "storageMB":
+		f.MaxStorageMB = saved.MaxStorageMB
+	case "imageMB":
+		f.MaxImageMB = saved.MaxImageMB
+	case "patterns":
+		f.IgnorePatterns = saved.IgnorePatterns
+	case "ignoreApps":
+		f.IgnoreApps = saved.IgnoreApps
+	}
+	return f
 }
 
 func (a *app) saveShortcut(acc string) {
@@ -213,7 +282,7 @@ func (a *app) settingsView(c *ui.Context) {
 		c.Toast(s.toast)
 		s.toast = ""
 	}
-	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.settingsWin.Hide() })
+	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.closeSettings() })
 	ui.Column(c).Fill().Children(func() {
 		tabs := ui.TabsBase(c, &s.tab, len(settingsTabs))
 		tabs.List.FillWidth().Padding(14, 16, 10, 16).Gap(6).AlignItems(ui.Center).Children(func() {
@@ -223,6 +292,11 @@ func (a *app) settingsView(c *ui.Context) {
 		})
 		ui.Scroll(c).Grow(1).Children(func() {
 			ui.Column(c).Gap(18).Padding(6, 16, 20, 16).Children(func() {
+				// Leaving History removes its fields without a blur; commit a pending edit.
+				if s.tab != 1 && s.editing != "" {
+					s.editing = ""
+					a.applySettings()
+				}
 				switch s.tab {
 				case 0:
 					a.generalSection(c)
@@ -235,52 +309,6 @@ func (a *app) settingsView(c *ui.Context) {
 				}
 			})
 		})
-	})
-}
-
-// settingsGroup is a titled card of settings.
-func settingsGroup(c *ui.Context, title string, fn func()) {
-	t := c.Theme()
-	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(t.TextMuted).Margin(0, 0, 0, 4)
-		ui.Column(c).Padding(4, 14).Radius(12).Background(t.Text.Alpha(0.04)).Children(fn)
-	})
-}
-
-// settingRow is one setting: its name, help and error stacked on the
-// left, the controls fn builds on the right; fn nil builds none. Empty
-// help or err shows nothing.
-func settingRow(c *ui.Context, label, help, err string, fn func()) {
-	t := c.Theme()
-	ui.Row(c).Padding(10, 0).Gap(16).AlignItems(ui.Center).Children(func() {
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-			ui.Text(c, label).FontSize(13)
-			if help != "" {
-				ui.Text(c, help).FontSize(11).TextColor(t.TextMuted).Wrap()
-			}
-			if err != "" {
-				ui.Text(c, err).FontSize(11).TextColor(t.Danger).Wrap()
-			}
-		})
-		if fn != nil {
-			ui.Row(c).Shrink(0).Gap(8).AlignItems(ui.Center).Children(fn)
-		}
-	})
-}
-
-// settingBlock is a setting whose controls take the card's width below
-// its name: text areas and rows of several controls.
-func settingBlock(c *ui.Context, label, help, err string, fn func()) {
-	t := c.Theme()
-	ui.Column(c).Padding(10, 0).Gap(6).Children(func() {
-		ui.Text(c, label).FontSize(13)
-		fn()
-		if help != "" {
-			ui.Text(c, help).FontSize(11).TextColor(t.TextMuted).Wrap()
-		}
-		if err != "" {
-			ui.Text(c, err).FontSize(11).TextColor(t.Danger).Wrap()
-		}
 	})
 }
 
@@ -368,24 +396,16 @@ func (a *app) historySection(c *ui.Context) {
 	}
 	settingsGroup(c, "Limits", func() {
 		settingRow(c, "Max entries", "", "", func() {
-			if ui.NumberInput(c, &s.maxEntries, 50, 5000, 50).Label("Max entries").Width(140).Changed() {
-				a.applySettings()
-			}
+			a.commitOnBlur("maxEntries", ui.NumberInput(c, &s.maxEntries, 50, 5000, 50).Label("Max entries").Width(140))
 		})
 		settingRow(c, "Keep for days", "0 keeps forever", "", func() {
-			if ui.NumberInput(c, &s.retention, 0, 3650, 1).Label("Keep for days").Width(140).Changed() {
-				a.applySettings()
-			}
+			a.commitOnBlur("retention", ui.NumberInput(c, &s.retention, 0, 3650, 1).Label("Keep for days").Width(140))
 		})
 		settingRow(c, "Storage limit (MB)", "Oldest unpinned entries are removed when history passes this size. Pinned entries count toward it but are never removed.", "", func() {
-			if ui.NumberInput(c, &s.storageMB, 100, 20480, 100).Label("Storage limit (MB)").Width(140).Changed() {
-				a.applySettings()
-			}
+			a.commitOnBlur("storageMB", ui.NumberInput(c, &s.storageMB, 100, 20480, 100).Label("Storage limit (MB)").Width(140))
 		})
 		settingRow(c, "Max image size (MB)", "", "", func() {
-			if ui.NumberInput(c, &s.imageMB, 1, 50, 1).Label("Max image size (MB)").Width(140).Changed() {
-				a.applySettings()
-			}
+			a.commitOnBlur("imageMB", ui.NumberInput(c, &s.imageMB, 1, 50, 1).Label("Max image size (MB)").Width(140))
 		})
 	})
 	settingsGroup(c, "Capture", func() {
@@ -401,16 +421,16 @@ func (a *app) historySection(c *ui.Context) {
 	settingsGroup(c, "Behavior", func() {
 		sw("Move copied entry to top", "", &s.form.MoveToTopOnCopy)
 	})
+	appsHelp := "One per line: bundle ID or app name on macOS (com.agilebits.onepassword7), executable on Windows (keepass.exe), window class on Linux X11. Copies from these apps are not recorded."
+	if a.waylandCapture {
+		appsHelp += " Wayland clipboard capture can't tell which app copied, so this list has no effect."
+	}
 	settingsGroup(c, "Ignore", func() {
 		settingBlock(c, "Ignore patterns", "One regular expression per line. Text matching one entirely is not recorded.", s.patErr, func() {
-			if ui.TextArea(c, &s.patterns).Label("Ignore patterns").FillWidth().Height(90).Changed() {
-				a.applySettings()
-			}
+			a.commitOnBlur("patterns", ui.TextArea(c, &s.patterns).Label("Ignore patterns").FillWidth().Height(90))
 		})
-		settingBlock(c, "Ignore apps", "One per line: bundle ID or app name on macOS (com.agilebits.onepassword7), executable on Windows (keepass.exe), window class on Linux X11. Copies from these apps are not recorded.", "", func() {
-			if ui.TextArea(c, &s.ignoreApps).Label("Ignore apps").FillWidth().Height(70).Changed() {
-				a.applySettings()
-			}
+		settingBlock(c, "Ignore apps", appsHelp, "", func() {
+			a.commitOnBlur("ignoreApps", ui.TextArea(c, &s.ignoreApps).Label("Ignore apps").FillWidth().Height(70))
 			if len(s.recentApps) > 0 {
 				ui.Row(c).Wrap().Gap(6).Children(func() {
 					for _, app := range s.recentApps {
@@ -498,13 +518,13 @@ func (a *app) aboutSection(c *ui.Context) {
 	}
 }
 
-// patternErrText words an ignore-pattern error for the settings form.
-func patternErrText(err error) string {
-	var pe *settings.PatternError
-	if errors.As(err, &pe) {
-		return fmt.Sprintf("Line %d: %v", pe.Line, pe.Err)
+// patternErrText words the ignore-pattern errors for the settings form.
+func patternErrText(errs []*settings.PatternError) string {
+	parts := make([]string, 0, len(errs))
+	for _, e := range errs {
+		parts = append(parts, fmt.Sprintf("Line %d: %v", e.Line, e.Err))
 	}
-	return err.Error()
+	return "Not applied, previous patterns kept. " + strings.Join(parts, "; ")
 }
 
 // ignoreApp adds app to the ignore list unless it is listed.

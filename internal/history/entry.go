@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"image"
 	"image/png"
 	"net/url"
@@ -28,7 +29,23 @@ const (
 const (
 	// MaxTextBytes is the largest text that is recorded.
 	MaxTextBytes = 1 << 20
+	// MaxImagePixels caps decoded image area; larger images are never decoded.
+	MaxImagePixels = 40_000_000
+	// MaxHTMLBytes is the largest rich-text payload kept with an entry.
+	MaxHTMLBytes = 1 << 20
+	// MaxTitleRunes is the longest title an entry can carry.
+	MaxTitleRunes = 100
+	// MaxUndoBytes bounds the data a delete keeps for undo.
+	MaxUndoBytes = 64 << 20
 )
+
+// ErrTooManyPixels reports an image whose decoded area is over MaxImagePixels.
+var ErrTooManyPixels = errors.New("image has too many pixels")
+
+// ImageDimsOK reports whether a w×h image is non-empty and within MaxImagePixels.
+func ImageDimsOK(w, h int) bool {
+	return w > 0 && h > 0 && int64(w)*int64(h) <= MaxImagePixels
+}
 
 // Entry is a history row. List queries leave Image and HTML empty.
 type Entry struct {
@@ -108,6 +125,13 @@ func (c Capture) Size() int64 {
 
 // MakeThumb scales a PNG to fit 128×128 without upscaling.
 func MakeThumb(data []byte) ([]byte, error) {
+	cfg, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if !ImageDimsOK(cfg.Width, cfg.Height) {
+		return nil, ErrTooManyPixels
+	}
 	src, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, err

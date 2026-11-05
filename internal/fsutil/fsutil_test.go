@@ -1,11 +1,50 @@
 package fsutil
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
+
+func TestWriteFileAtomicFuncFailureKeepsOldFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "out.json")
+	if err := os.WriteFile(p, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteFileAtomicFunc(p, func(w io.Writer) error {
+		w.Write([]byte("partial"))
+		return errors.New("boom")
+	})
+	if err == nil {
+		t.Fatal("want error")
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != "old" {
+		t.Fatalf("file = %q, want old", got)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("temp file left behind: %d entries", len(entries))
+	}
+}
+
+func TestWriteFileAtomicFuncStreams(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "out.json")
+	if err := WriteFileAtomicFunc(p, func(w io.Writer) error {
+		_, err := io.WriteString(w, "hello")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != "hello" {
+		t.Fatalf("file = %q", got)
+	}
+}
 
 func TestWriteFileAtomicReplacesWithMode0600(t *testing.T) {
 	dir := t.TempDir()

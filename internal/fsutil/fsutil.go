@@ -2,6 +2,8 @@
 package fsutil
 
 import (
+	"bufio"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -10,12 +12,25 @@ import (
 // file in the same directory and renames it over path, so a failed write
 // keeps the old file and an existing file's mode never survives.
 func WriteFileAtomic(path string, data []byte) error {
+	return WriteFileAtomicFunc(path, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// WriteFileAtomicFunc is WriteFileAtomic for content produced by write, which
+// streams into a buffered temp file so large output never sits in memory.
+func WriteFileAtomicFunc(path string, write func(io.Writer) error) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
-	_, err = f.Write(data)
+	bw := bufio.NewWriter(f)
+	err = write(bw)
+	if e := bw.Flush(); err == nil {
+		err = e
+	}
 	if e := f.Sync(); err == nil {
 		err = e
 	}

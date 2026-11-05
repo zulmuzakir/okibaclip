@@ -2,7 +2,9 @@ package history
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"okibaclip/internal/search"
@@ -97,8 +99,17 @@ func (s *Store) SnippetFolders(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// ErrInvalidSnippet means a snippet has no name or no body after trimming.
+var ErrInvalidSnippet = errors.New("snippet needs a name and a body")
+
 // SaveSnippet inserts a snippet (ID 0) or updates it, and returns its id.
 func (s *Store) SaveSnippet(ctx context.Context, sn Snippet) (int64, error) {
+	if strings.TrimSpace(sn.Name) == "" || strings.TrimSpace(sn.Body) == "" {
+		return 0, ErrInvalidSnippet
+	}
+	if len(sn.Body) > MaxTextBytes {
+		return 0, ErrTooLarge
+	}
 	now := ms(time.Now())
 	if sn.ID == 0 {
 		r, err := s.db.Execute(ctx, `INSERT INTO snippets (name,body,folder,shortcut,created_at,updated_at) VALUES (?,?,?,?,?,?)`, sn.Name, sn.Body, sn.Folder, sn.Shortcut, now, now)

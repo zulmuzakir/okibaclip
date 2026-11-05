@@ -54,7 +54,8 @@ type Monitor struct {
 	started   bool
 	wasPaused bool
 
-	captureFails int // consecutive store.Capture failures for the pending change
+	captureFails int    // consecutive failed attempts at the pending change
+	lastHash     string // hash of the last capture stored or suppressed (Run goroutine only)
 }
 
 // New returns a Monitor that records src into store.
@@ -64,17 +65,19 @@ func New(src Source, store *history.Store, s settings.Settings, onChange func())
 	if m.onChange == nil {
 		m.onChange = func() {}
 	}
-	_ = m.SetConfig(s)
+	s.Normalize()
+	_, pats, _ := settings.CompilePatterns(s.IgnorePatterns)
+	m.settings.Store(&monitorConfig{Settings: s, patterns: pats})
 	return m
 }
 
 // SetConfig installs new settings; it fails when an ignore pattern is bad.
 func (m *Monitor) SetConfig(s settings.Settings) error {
-	s.Normalize()
-	pats, err := settings.CompilePatterns(s.IgnorePatterns)
-	if err != nil {
-		return err
+	_, pats, errs := settings.CompilePatterns(s.IgnorePatterns)
+	if len(errs) > 0 {
+		return errs[0]
 	}
+	s.Normalize()
 	m.settings.Store(&monitorConfig{Settings: s, patterns: pats})
 	return nil
 }
@@ -153,7 +156,13 @@ func (m *Monitor) takeSuppressed(hash string) bool {
 
 // Run polls until ctx ends.
 func (m *Monitor) Run(ctx context.Context) {
-	go m.pruneLoop(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.pruneLoop(ctx)
+	}()
+	defer wg.Wait()
 	poll := m.cfg().PollMillis
 	ticker := time.NewTicker(time.Duration(poll) * time.Millisecond)
 	defer ticker.Stop()
@@ -240,6 +249,16 @@ func (m *Monitor) baseline(tok uint64, haveTok bool, formats []transfer.Format) 
 	m.lastPrint = m.fingerprint(formats)
 }
 
+// retryPending records one failed attempt at the pending change. After
+// maxCaptureTries it gives up on the change by calling update.
+func (m *Monitor) retryPending(update func()) {
+	m.captureFails++
+	if m.captureFails >= maxCaptureTries {
+		slog.Warn("clipboard change abandoned", "fails", m.captureFails)
+		update()
+	}
+}
+
 // tick runs one poll.
 func (m *Monitor) tick(ctx context.Context) {
 	cfg := m.cfg()
@@ -247,12 +266,13 @@ func (m *Monitor) tick(ctx context.Context) {
 	paused, _ := m.Paused()
 	if paused {
 		m.wasPaused = true
-		m.baseline(tok, haveTok, m.src.Formats())
 		return
 	}
 	if m.wasPaused {
 		m.wasPaused = false
-		m.pausedUntil.Store(0)
+		if p := m.pausedUntil.Load(); p != 0 && p != math.MaxInt64 {
+			m.pausedUntil.CompareAndSwap(p, 0)
+		}
 		m.baseline(tok, haveTok, m.src.Formats())
 		m.onChange()
 		return
@@ -274,6 +294,7 @@ func (m *Monitor) tick(ctx context.Context) {
 	m.started = true
 	// update marks the change as seen.
 	update := func() {
+		m.captureFails = 0
 		if haveTok {
 			m.lastToken, m.haveToken = tok, true
 		} else {
@@ -281,7 +302,7 @@ func (m *Monitor) tick(ctx context.Context) {
 		}
 	}
 	if len(formats) == 0 {
-		update()
+		m.retryPending(update)
 		return
 	}
 	owner := m.src.Owner()
@@ -321,8 +342,13 @@ func (m *Monitor) tick(ctx context.Context) {
 			return // retry on the next tick
 		}
 		slog.Error("clipboard read", "err", err)
-		update()
+		m.retryPending(update)
 		return
+	}
+	if haveTok {
+		if t2, _ := m.src.Token(); t2 != tok {
+			return // changed during the read: re-check sensitivity next tick
+		}
 	}
 	c, reason, ok := Classify(data, wanted, cfg.Settings, cfg.patterns)
 	if !ok {
@@ -334,9 +360,17 @@ func (m *Monitor) tick(ctx context.Context) {
 		return
 	}
 	c.SourceApp, c.SourceName, c.SourcePath = owner.App, owner.Name, owner.Path
-	if m.takeSuppressed(c.Hash()) {
+	h := c.Hash()
+	if m.takeSuppressed(h) {
+		m.lastHash = h
 		update()
 		return
+	}
+	if h == m.lastHash {
+		if ok, err := m.store.HasHash(ctx, h); err == nil && ok {
+			update() // same content re-announced (watcher restart, delayed rendering): not a new copy
+			return
+		}
 	}
 	if m.takeIgnore() {
 		update()
@@ -355,14 +389,10 @@ func (m *Monitor) tick(ctx context.Context) {
 		if ctx.Err() == nil {
 			slog.Error("store capture", "err", err)
 		}
-		m.captureFails++
-		if m.captureFails >= maxCaptureTries {
-			m.captureFails = 0
-			update()
-		}
+		m.retryPending(update)
 		return // not marked seen: the next tick retries
 	}
-	m.captureFails = 0
+	m.lastHash = h
 	update()
 	if _, err := m.store.Prune(ctx, cfg.Settings.Limits(), m.now()); err != nil && ctx.Err() == nil {
 		slog.Error("prune", "err", err)

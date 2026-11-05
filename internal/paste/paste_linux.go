@@ -70,11 +70,28 @@ func Available(waylandMode string) (bool, string) {
 	return true, ""
 }
 
-func (System) Remember()         {}
+func (System) Remember() Target  { return Target{} }
 func (System) Trusted(bool) bool { return true }
 
-// Paste sends Ctrl+V, then Left left times, through XTEST.
-func (System) Paste(left int) error {
+// modifierKeysyms are Shift, Control, Alt and Super. Paste releases any still
+// held (the panel hotkey may be one), so they don't turn Ctrl+V into another chord.
+var modifierKeysyms = []xproto.Keysym{0xffe1, 0xffe2, 0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec}
+
+// heldCodes returns the codes whose bit is set in keys, a QueryKeymap bitmap
+// indexed by keycode.
+func heldCodes(keys []byte, codes []byte) []byte {
+	var held []byte
+	for _, c := range codes {
+		if int(c/8) < len(keys) && keys[c/8]&(1<<(c%8)) != 0 {
+			held = append(held, c)
+		}
+	}
+	return held
+}
+
+// Paste releases held modifiers, then sends Ctrl+V and Left left times, through XTEST.
+// The target is unused: X11 sends to the focused window.
+func (System) Paste(_ Target, left int) error {
 	time.Sleep(settle)
 	x11.mu.Lock()
 	defer x11.mu.Unlock()
@@ -86,12 +103,28 @@ func (System) Paste(left int) error {
 	if ctrl == 0 || v == 0 || (left > 0 && lk == 0) {
 		return errors.New("keyboard layout has no Control, V or Left key")
 	}
+	var mods []byte
+	for _, sym := range modifierKeysyms {
+		if code := x11.keys[sym]; code != 0 {
+			mods = append(mods, code)
+		}
+	}
+	rep, err := xproto.QueryKeymap(c).Reply()
+	if err != nil {
+		return err
+	}
+	if rep == nil {
+		return errors.New("X11 QueryKeymap returned no data")
+	}
 	send := func(code byte, down bool) {
 		typ := byte(xproto.KeyRelease)
 		if down {
 			typ = xproto.KeyPress
 		}
 		xtest.FakeInput(c, typ, code, 0, x11.root, 0, 0, 0)
+	}
+	for _, code := range heldCodes(rep.Keys, mods) {
+		send(code, false)
 	}
 	send(ctrl, true)
 	send(v, true)

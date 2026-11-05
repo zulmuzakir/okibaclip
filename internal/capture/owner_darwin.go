@@ -4,6 +4,7 @@ package capture
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -36,6 +37,8 @@ func nsString(id objc.ID) string {
 // frontOwner is the frontmost application, which is what the user copied
 // from.
 func frontOwner() Owner {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ws := objc.GetClass("NSWorkspace")
 	pool := objc.GetClass("NSAutoreleasePool")
 	if ws == 0 || pool == 0 {

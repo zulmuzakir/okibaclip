@@ -16,6 +16,7 @@ import (
 
 	"okibaclip/internal/history"
 	"okibaclip/internal/history/historytest"
+	"okibaclip/internal/paste"
 	"okibaclip/internal/settings"
 )
 
@@ -48,12 +49,18 @@ func (m *fakeMon) SetConfig(settings.Settings) error { return nil }
 type fakePaster struct {
 	trusted   bool
 	remembers int
+	target    paste.Target
+	targets   []paste.Target
 	pastes    []int
 }
 
-func (p *fakePaster) Remember()            { p.remembers++ }
-func (p *fakePaster) Trusted(bool) bool    { return p.trusted }
-func (p *fakePaster) Paste(left int) error { p.pastes = append(p.pastes, left); return nil }
+func (p *fakePaster) Remember() paste.Target { p.remembers++; return p.target }
+func (p *fakePaster) Trusted(bool) bool      { return p.trusted }
+func (p *fakePaster) Paste(t paste.Target, left int) error {
+	p.targets = append(p.targets, t)
+	p.pastes = append(p.pastes, left)
+	return nil
+}
 
 // fakeHotkeys records global shortcut registrations.
 type fakeHotkeys struct {
@@ -87,6 +94,7 @@ func newPanelFixture(t *testing.T, items ...string) *panelFixture {
 	a.hotkeys = f.keys
 	a.fileIcon = func(string, int) ([]byte, error) { return nil, errors.New("no icon") }
 	a.saveDialog = func(mygo.SaveDialogOptions) (string, error) { return "", nil }
+	a.openDialog = func(mygo.OpenDialogOptions) ([]string, error) { return nil, nil }
 	f.a = a
 	for i, s := range items {
 		historytest.Add(t, a.store, history.Capture{Kind: history.KindText, Text: s}, historytest.T0.Add(time.Duration(i)*time.Second))
@@ -613,7 +621,7 @@ func TestPanelPasteNeedsOptInAndTrust(t *testing.T) {
 	}
 }
 
-func TestPanelSnippetShortcutConflict(t *testing.T) {
+func TestPanelSnippetShortcutAliasConflicts(t *testing.T) {
 	f := newPanelFixture(t)
 	f.a.shortcut = "Alt+Shift+V"
 	f.a.newSnippet("n", "body")
@@ -636,6 +644,32 @@ func TestPanelSnippetShortcutConflict(t *testing.T) {
 	f.a.saveEditor()
 	if f.a.editor.err != "That shortcut belongs to another snippet" {
 		t.Errorf("err = %q", f.a.editor.err)
+	}
+}
+
+func TestPanelDeleteSnippetFailureKeepsShortcut(t *testing.T) {
+	f := newPanelFixture(t)
+	f.a.ctx = context.Background()
+	f.a.newSnippet("n", "body")
+	f.a.editor.shortcut = "CmdOrCtrl+Alt+1"
+	f.a.saveEditor()
+	snips, err := f.a.store.Snippets(context.Background(), nil)
+	if err != nil || len(snips) != 1 {
+		t.Fatalf("snippets %v, err %v", snips, err)
+	}
+	s := snips[0]
+	if err := f.a.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.a.deleteSnippet(s)
+	if !strings.HasPrefix(f.a.toast, "Delete snippet failed: ") {
+		t.Errorf("toast = %q", f.a.toast)
+	}
+	if _, _, ok := f.a.snippetHotkey(s.ID); !ok {
+		t.Error("shortcut dropped although the delete failed")
+	}
+	if len(f.keys.unregistered) != 0 {
+		t.Errorf("unregistered %v", f.keys.unregistered)
 	}
 }
 
@@ -693,5 +727,98 @@ func TestPanelRenamePinnedShowsTitle(t *testing.T) {
 	f.tt.Frame()
 	if !f.tt.HasText("Router") {
 		t.Errorf("title not shown: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelTrayCopyDoesNotPaste(t *testing.T) {
+	f := newPanelFixture(t, "tray")
+	f.a.cfg.PasteAfterCopy, f.a.pasteOK, f.paster.trusted = true, true, true
+	f.a.copyEntry(f.a.items[0], false, true)
+	f.a.copySnippet(history.Snippet{Name: "n", Body: "snip"}, true)
+	if got := f.written(t); !slices.Equal(got, []string{"tray", "snip"}) {
+		t.Fatalf("written = %q", got)
+	}
+	if len(f.paster.pastes) != 0 {
+		t.Errorf("tray copy pasted: %v", f.paster.pastes)
+	}
+}
+
+func TestPanelPasteUsesTargetRememberedOnShow(t *testing.T) {
+	f := newPanelFixture(t, "x")
+	f.a.cfg.PasteAfterCopy, f.a.pasteOK, f.paster.trusted = true, true, true
+	f.paster.target = paste.Target{Window: 7}
+	f.a.rememberTarget()
+	if f.paster.remembers != 0 {
+		t.Fatalf("remembered without a hidden panel")
+	}
+	f.a.panelHidden = func() bool { return true }
+	f.a.rememberTarget()
+	if f.paster.remembers != 1 {
+		t.Fatalf("remembers = %d, want 1", f.paster.remembers)
+	}
+	f.tt.Key(0, ui.KeyEnter)
+	if !slices.Equal(f.paster.targets, []paste.Target{{Window: 7}}) {
+		t.Errorf("targets = %v, want [{Window:7}]", f.paster.targets)
+	}
+}
+
+func TestPanelSnippetCopyRunsOffMain(t *testing.T) {
+	f := newPanelFixture(t)
+	var queue []func()
+	f.a.async = func(fn func()) { queue = append(queue, fn) }
+	f.a.copySnippet(history.Snippet{Name: "Hi", Body: "Hi"}, false)
+	if len(f.writes) != 0 {
+		t.Fatalf("wrote before the background job ran: %q", f.written(t))
+	}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		fn()
+	}
+	if got := f.written(t); !slices.Equal(got, []string{"Hi"}) {
+		t.Errorf("written = %q", got)
+	}
+}
+
+func TestStartShowsPanel(t *testing.T) {
+	cases := []struct {
+		login, firstRunDone bool
+		trayErr, shortcut   string
+		want                bool
+	}{
+		{true, true, "tray failed", "", true},
+		{true, true, "", "Alt+Shift+V", false},
+		{false, false, "", "x", true},
+	}
+	for _, c := range cases {
+		if got := startShowsPanel(c.login, c.firstRunDone, c.trayErr, c.shortcut); got != c.want {
+			t.Errorf("startShowsPanel(%v,%v,%q,%q) = %v, want %v", c.login, c.firstRunDone, c.trayErr, c.shortcut, got, c.want)
+		}
+	}
+}
+
+func TestPanelPreviewTruncatesLongText(t *testing.T) {
+	f := newPanelFixture(t, strings.Repeat("a", 20005))
+	f.tt.Frame()
+	if !f.tt.HasText("… (5 more characters)") {
+		t.Errorf("preview not truncated: %q", f.tt.Texts())
+	}
+}
+
+func TestPanelPlainToastDropsStaleUndo(t *testing.T) {
+	f := newPanelFixture(t, "first", "second")
+	f.tt.Key(ui.Cmd, ui.KeyBackspace) // deletes "second", the chosen top row
+	f.tt.Frame()
+	if !f.tt.HasText("Undo") {
+		t.Fatalf("no Undo toast: %q", f.tt.Texts())
+	}
+	f.a.toastUndo = []history.Entry{{ID: 99}}
+	f.a.toast = "Copy failed: x"
+	f.tt.Frame()
+	if f.a.toastUndo != nil {
+		t.Errorf("stale undo kept on plain toast: %+v", f.a.toastUndo)
+	}
+	if !f.tt.HasText("Copy failed: x") {
+		t.Errorf("plain toast missing: %q", f.tt.Texts())
 	}
 }

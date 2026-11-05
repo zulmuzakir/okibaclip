@@ -63,7 +63,7 @@ func TestOpenMigratesV1Database(t *testing.T) {
 		t.Errorf("PinOrder = %d, want -5000", l[0].PinOrder)
 	}
 	s.Close()
-	if v := userVersion(t, p); v != 2 {
+	if v := userVersion(t, p); v != 3 {
 		t.Errorf("user_version = %d", v)
 	}
 	db, _ = sqlite.Open(ctx, p, sqlite.OpenOptions{})
@@ -104,7 +104,7 @@ func TestOpenRecoversHalfCreatedV1(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	if v := userVersion(t, p); v != 2 {
+	if v := userVersion(t, p); v != 3 {
 		t.Errorf("user_version = %d", v)
 	}
 }
@@ -302,7 +302,11 @@ func TestExportImportKeepsV2Fields(t *testing.T) {
 	src.SetPinned(ctx, id, true)
 	src.SetTitle(ctx, id, "Named")
 	src.SaveSnippet(ctx, history.Snippet{Name: "n", Body: "b", Folder: "Work", Shortcut: "CmdOrCtrl+1"})
-	f, err := src.Export(ctx)
+	var buf bytes.Buffer
+	if err := src.WriteExport(ctx, &buf); err != nil {
+		t.Fatal(err)
+	}
+	f, err := history.DecodeExport(buf.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,5 +329,165 @@ func TestExportImportKeepsV2Fields(t *testing.T) {
 		t.Fatal(err)
 	} else if _, _, _, err := dst.Import(ctx, f2); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIDsNotReusedAfterDelete(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id1 := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0)
+	if _, _, err := s.Delete(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	id2 := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "b"}, historytest.T0)
+	if id2 <= id1 {
+		t.Errorf("id %d reused after deleting %d", id2, id1)
+	}
+}
+
+func TestRestoreMergesIntoRecapturedEntry(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0)
+	if err := s.SetPinned(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTitle(ctx, id, "T"); err != nil {
+		t.Fatal(err)
+	}
+	_, undo, err := s.Delete(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0.Add(time.Minute))
+	if err := s.Restore(ctx, undo); err != nil {
+		t.Fatal(err)
+	}
+	l, _ := s.List(ctx, history.Filter{Tab: "all"})
+	if len(l) != 1 || !l[0].Pinned || l[0].Title != "T" {
+		t.Errorf("entries = %+v, want one pinned entry titled T", l)
+	}
+}
+
+func TestDeleteSkipsUndoOverCap(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	thumb := make([]byte, 33<<20)
+	var ids []int64
+	for _, w := range []int{1, 2} {
+		id, _, err := s.Capture(ctx, history.Capture{Kind: history.KindImage, Image: historytest.PNG(t, w, w), Width: w, Height: w}, thumb, historytest.T0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	n, undo, err := s.Delete(ctx, ids...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || undo != nil {
+		t.Errorf("deleted %d, undo %v; want 2 and nil undo", n, undo)
+	}
+	if l, _ := s.List(ctx, history.Filter{Tab: "all"}); len(l) != 0 {
+		t.Errorf("%d entries left", len(l))
+	}
+}
+
+func TestPruneRetentionKeepsNewest(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "only"}, historytest.T0)
+	n, err := s.Prune(ctx, history.Limits{Retention: time.Minute}, historytest.T0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("pruned %d, want 0: the newest unpinned entry stays", n)
+	}
+}
+
+func TestCaptureDedupeRefreshesHTML(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0)
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a", HTML: "<i>a</i>"}, historytest.T0.Add(time.Second))
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.HTML != "<i>a</i>" {
+		t.Fatalf("html = %q after rich re-copy", e.HTML)
+	}
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0.Add(2*time.Second))
+	if e, _ = s.Get(ctx, id); e.HTML != "<i>a</i>" {
+		t.Errorf("plain re-copy dropped html: %q", e.HTML)
+	}
+}
+
+func TestSourceAppsNameFromNewestNamed(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "x1", SourceApp: "app.a", SourceName: "Old"}, historytest.T0)
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "x2", SourceApp: "app.a"}, historytest.T0.Add(time.Minute))
+	apps, err := s.SourceApps(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 1 || apps[0].Name != "Old" {
+		t.Fatalf("apps = %+v, want Old", apps)
+	}
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "x3", SourceApp: "app.a", SourceName: "New"}, historytest.T0.Add(2*time.Minute))
+	if apps, _ = s.SourceApps(ctx, 10); len(apps) != 1 || apps[0].Name != "New" {
+		t.Errorf("apps = %+v, want New", apps)
+	}
+}
+
+func TestUpdateTextRejectsOversize(t *testing.T) {
+	s := historytest.NewStore(t)
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0)
+	if _, err := s.UpdateText(context.Background(), id, strings.Repeat("x", history.MaxTextBytes+1), historytest.T0); err != history.ErrTooLarge {
+		t.Errorf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestSetTitleCapsRunes(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "a"}, historytest.T0)
+	if err := s.SetTitle(ctx, id, strings.Repeat("é", 150)); err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(e.Title)); n != history.MaxTitleRunes {
+		t.Errorf("title has %d runes, want %d", n, history.MaxTitleRunes)
+	}
+}
+
+func TestImportSkipsInvalidSnippetsAndHugeImages(t *testing.T) {
+	ctx := context.Background()
+	now := historytest.T0.UnixMilli()
+	f := history.ExportFile{
+		Format:  history.ExportFormat,
+		Version: history.ExportVersion,
+		Entries: []history.ExportEntry{{Kind: history.KindImage, Image: historytest.PNGHeader(8001, 5001), Width: 8001, Height: 5001, CreatedAt: now, UsedAt: now}},
+		Snippets: []history.ExportSnippet{
+			{Name: "  ", Body: "x"},
+			{Name: "huge", Body: strings.Repeat("x", history.MaxTextBytes+1)},
+			{Name: " Hi ", Body: "hello"},
+		},
+	}
+	dst := historytest.NewStore(t)
+	entries, snippets, _, err := dst.Import(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries != 0 || snippets != 1 {
+		t.Errorf("imported %d entries and %d snippets; want 0 and 1", entries, snippets)
+	}
+	if sn, _ := dst.Snippets(ctx, nil); len(sn) != 1 || sn[0].Name != "Hi" {
+		t.Errorf("snippets = %+v, want one named Hi", sn)
 	}
 }

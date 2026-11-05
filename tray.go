@@ -53,7 +53,7 @@ func trayLabel(e history.Entry) string {
 
 func (a *app) buildTrayMenu() *mygo.Menu {
 	item := func(e history.Entry) *mygo.MenuItem {
-		return &mygo.MenuItem{Label: trayLabel(e), Click: func(*mygo.MenuItem, *mygo.Window) { a.copyEntry(e, false) }}
+		return &mygo.MenuItem{Label: trayLabel(e), Click: func(*mygo.MenuItem, *mygo.Window) { a.copyEntry(e, false, true) }}
 	}
 	var items []*mygo.MenuItem
 	items = append(items,
@@ -74,8 +74,8 @@ func (a *app) buildTrayMenu() *mygo.Menu {
 	}
 	var snips []*mygo.MenuItem
 	for _, s := range a.traySnippets {
-		it := &mygo.MenuItem{Label: truncRunes(s.Name, 40), Click: func(*mygo.MenuItem, *mygo.Window) { a.copySnippet(s) }}
-		if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+		it := &mygo.MenuItem{Label: truncRunes(s.Name, 40), Click: func(*mygo.MenuItem, *mygo.Window) { a.copySnippet(s, true) }}
+		if _, _, ok := a.snippetHotkey(s.ID); ok {
 			it.Accelerator = s.Shortcut
 		}
 		snips = append(snips, it)

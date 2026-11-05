@@ -10,6 +10,6 @@ func Available(waylandMode string) (ok bool, note string) {
 	return false, "Not supported on this system."
 }
 
-func (System) Remember()         {}
-func (System) Trusted(bool) bool { return true }
-func (System) Paste(int) error   { return errors.ErrUnsupported }
+func (System) Remember() Target            { return Target{} }
+func (System) Trusted(bool) bool           { return true }
+func (System) Paste(_ Target, _ int) error { return errors.ErrUnsupported }

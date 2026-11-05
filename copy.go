@@ -44,10 +44,11 @@ func existingPaths(paths []string) (found []string, missing int) {
 
 // copyResult is what a copy produced, for the main thread to show.
 type copyResult struct {
-	ok    bool   // the panel may hide
-	toast string // message to show, if any
-	err   error
-	left  int // runes to move the caret back after pasting
+	ok       bool   // the panel may hide
+	toast    string // message to show, if any
+	err      error
+	left     int  // runes to move the caret back after pasting
+	fromTray bool // copied from the tray menu: never auto-paste
 }
 
 // textHash is the history hash of text as the monitor would capture it.
@@ -72,21 +73,15 @@ func (a *app) write(hash string, d transfer.Data) error {
 	return err
 }
 
-// writeEntry writes e (a full row) to the clipboard. With suppress, the
-// monitor drops the resulting capture; plain file-path text is always dropped.
-func (a *app) writeEntry(e history.Entry, plain, suppress bool) copyResult {
-	h := func(s string) string {
-		if suppress {
-			return s
-		}
-		return ""
-	}
+// writeEntry writes e (a full row) to the clipboard. Every write is suppressed
+// so the monitor drops its own capture; plain file-path text is never recorded.
+func (a *app) writeEntry(e history.Entry, plain bool) copyResult {
 	switch e.Kind {
 	case history.KindImage:
 		if plain {
 			return copyResult{toast: "Images have no plain text"}
 		}
-		if err := a.write(h(e.Hash), imageData(e.Image)); err != nil {
+		if err := a.write(e.Hash, imageData(e.Image)); err != nil {
 			return copyResult{err: err}
 		}
 	case history.KindFiles:
@@ -105,7 +100,7 @@ func (a *app) writeEntry(e history.Entry, plain, suppress bool) copyResult {
 		if err != nil {
 			return copyResult{err: err}
 		}
-		if err := a.write(h(filesHash(found)), d); err != nil {
+		if err := a.write(filesHash(found), d); err != nil {
 			return copyResult{err: err}
 		}
 		if missing > 0 {
@@ -116,7 +111,7 @@ func (a *app) writeEntry(e history.Entry, plain, suppress bool) copyResult {
 		if plain {
 			html = ""
 		}
-		if err := a.write(h(e.Hash), textData(e.Text, html)); err != nil {
+		if err := a.write(e.Hash, textData(e.Text, html)); err != nil {
 			return copyResult{err: err}
 		}
 	}
@@ -136,13 +131,14 @@ func (a *app) finishCopy(r copyResult) {
 	if r.ok {
 		a.hint = "Copied — press " + pasteKey() + " to paste"
 		a.hide()
-		if a.cfg.PasteAfterCopy && a.pasteOK {
+		if a.cfg.PasteAfterCopy && a.pasteOK && !r.fromTray {
 			if a.paster.Trusted(false) {
 				a.hint = ""
-				p, left := a.paster, r.left
+				p, t, left := a.paster, a.pasteTarget, r.left
 				a.async(func() {
-					if err := p.Paste(left); err != nil {
+					if err := p.Paste(t, left); err != nil {
 						slog.Warn("paste", "err", err)
+						a.post(func() { a.hint = "Copied — press " + pasteKey() + " to paste" })
 					}
 				})
 			} else {
@@ -153,7 +149,8 @@ func (a *app) finishCopy(r copyResult) {
 }
 
 // copyEntry copies a history entry (a list row, fetched in full first).
-func (a *app) copyEntry(e history.Entry, plain bool) {
+// Tray copies never auto-paste: the user is in another app's menu.
+func (a *app) copyEntry(e history.Entry, plain, fromTray bool) {
 	moveToTop := a.cfg.MoveToTopOnCopy // read here: the closure runs off the main thread
 	a.async(func() {
 		full, err := a.store.Get(a.ctx, e.ID)
@@ -161,7 +158,8 @@ func (a *app) copyEntry(e history.Entry, plain bool) {
 			a.post(func() { a.finishCopy(copyResult{err: err}) })
 			return
 		}
-		r := a.writeEntry(full, plain, !moveToTop)
+		r := a.writeEntry(full, plain)
+		r.fromTray = fromTray
 		if r.ok && moveToTop {
 			if err := a.store.Touch(a.ctx, e.ID, time.Now()); err != nil {
 				slog.Error("touch", "err", err)
@@ -251,26 +249,31 @@ func (a *app) copyTransformed(e history.Entry, t transform.Transform) {
 	})
 }
 
-// copySnippet writes a snippet with its placeholders expanded.
-func (a *app) copySnippet(s history.Snippet) {
-	clip := func() string {
-		b, err := a.src.ReadFormat(transfer.Text)
-		if err != nil {
-			return ""
+// copySnippet writes a snippet with its placeholders expanded. The clipboard
+// write runs off the main thread; the result is finished on the main thread.
+func (a *app) copySnippet(s history.Snippet, fromTray bool) {
+	a.async(func() {
+		clip := func() string {
+			b, err := a.src.ReadFormat(transfer.Text)
+			if err != nil {
+				return ""
+			}
+			return string(b)
 		}
-		return string(b)
-	}
-	text, left := placeholder.Expand(s.Body, time.Now(), clip)
-	err := a.write(textHash(text), textData(text, ""))
-	if err == nil {
-		a.async(func() {
+		text, left := placeholder.Expand(s.Body, time.Now(), clip)
+		err := a.write(textHash(text), textData(text, ""))
+		if err == nil {
 			if err := a.store.UseSnippet(a.ctx, s.ID, time.Now()); err != nil {
 				slog.Error("use snippet", "err", err)
 			}
-			a.post(a.changed)
+		}
+		a.post(func() {
+			a.finishCopy(copyResult{ok: err == nil, err: err, left: left, fromTray: fromTray})
+			if err == nil {
+				a.changed()
+			}
 		})
-	}
-	a.finishCopy(copyResult{ok: err == nil, err: err, left: left})
+	})
 }
 
 // saveImage asks where to save an image entry, then writes its PNG there.

@@ -4,6 +4,8 @@ package historytest
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/png"
 	"path/filepath"
@@ -57,5 +59,21 @@ func Texts(es []history.Entry) []string {
 	for _, e := range es {
 		out = append(out, e.Text)
 	}
+	return out
+}
+
+// PNGHeader returns a PNG that declares a w×h image but carries no pixel data.
+// png.DecodeConfig reads only the IHDR chunk, so it can exercise size limits
+// without allocating a real image.
+func PNGHeader(w, h int) []byte {
+	var ihdr [13]byte
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8], ihdr[9] = 8, 2 // 8-bit RGB
+	chunk := append([]byte("IHDR"), ihdr[:]...)
+	out := []byte("\x89PNG\r\n\x1a\n")
+	out = binary.BigEndian.AppendUint32(out, uint32(len(ihdr)))
+	out = append(out, chunk...)
+	out = binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(chunk))
 	return out
 }

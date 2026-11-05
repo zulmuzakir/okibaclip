@@ -1,6 +1,9 @@
 package capture
 
 import (
+	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"regexp"
 	"strings"
 	"testing"
@@ -112,5 +115,37 @@ func TestSensitive(t *testing.T) {
 	}
 	if IsSensitive(native, nil, read([]byte{1, 0, 0, 0})) {
 		t.Error("non-zero CanIncludeInClipboardHistory must not be sensitive")
+	}
+}
+
+// pngHeaderOnly returns a PNG that has a valid signature and IHDR chunk and
+// nothing else: enough for png.DecodeConfig, without allocating the pixels.
+func pngHeaderOnly(w, h uint32) []byte {
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], w)
+	binary.BigEndian.PutUint32(ihdr[4:8], h)
+	ihdr[8], ihdr[9] = 8, 6 // 8-bit RGBA
+	var b bytes.Buffer
+	b.WriteString("\x89PNG\r\n\x1a\n")
+	binary.Write(&b, binary.BigEndian, uint32(len(ihdr)))
+	chunk := append([]byte("IHDR"), ihdr...)
+	b.Write(chunk)
+	binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(chunk))
+	return b.Bytes()
+}
+
+func TestClassifyRejectsTooManyPixels(t *testing.T) {
+	d := richData(transfer.Bytes(transfer.PNG, pngHeaderOnly(8001, 5001)))
+	_, reason, ok := Classify(d, d.Formats(), settings.Default(), nil)
+	if ok || reason != "image over 40 megapixels" {
+		t.Errorf("ok = %v, reason = %q", ok, reason)
+	}
+}
+
+func TestClassifyAcceptsPixelBoundary(t *testing.T) {
+	d := richData(transfer.Bytes(transfer.PNG, pngHeaderOnly(8000, 5000)))
+	got, _, ok := Classify(d, d.Formats(), settings.Default(), nil)
+	if !ok || got.Width != 8000 || got.Height != 5000 {
+		t.Errorf("ok = %v, dims = %dx%d", ok, got.Width, got.Height)
 	}
 }

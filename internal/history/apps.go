@@ -46,7 +46,7 @@ func (s *Store) AppIcons(ctx context.Context) ([]AppIcon, error) {
 
 // SourceApps lists the n apps most recently copied from.
 func (s *Store) SourceApps(ctx context.Context, n int) ([]SourceApp, error) {
-	rows, err := s.db.Query(ctx, `SELECT source_app, max(source_name) FROM entries WHERE source_app!='' GROUP BY source_app ORDER BY max(used_at) DESC LIMIT ?`, n)
+	rows, err := s.db.Query(ctx, `SELECT source_app, source_name FROM (SELECT source_app, source_name, max(used_at) OVER (PARTITION BY source_app) AS last, row_number() OVER (PARTITION BY source_app ORDER BY (source_name!='') DESC, used_at DESC, id DESC) AS rn FROM entries WHERE source_app!='') WHERE rn = 1 ORDER BY last DESC LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}

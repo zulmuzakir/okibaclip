@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"context"
+	"errors"
 	"okibaclip/internal/history"
 	"okibaclip/internal/history/historytest"
 	"okibaclip/internal/settings"
@@ -17,15 +18,17 @@ import (
 )
 
 type fakeClip struct {
-	mu       sync.Mutex
-	useToken bool
-	token    uint64
-	formats  []transfer.Format
-	native   []string
-	data     transfer.Data
-	readErrs []error
-	reads    int
-	owner    Owner
+	mu          sync.Mutex
+	useToken    bool
+	token       uint64
+	formats     []transfer.Format
+	native      []string
+	data        transfer.Data
+	readErrs    []error
+	reads       int
+	formatReads int // Formats and NativeFormats calls
+	owner       Owner
+	onRead      func() // runs in Read with mu released, before data is returned
 }
 
 func (f *fakeClip) Token() (uint64, bool) {
@@ -33,9 +36,19 @@ func (f *fakeClip) Token() (uint64, bool) {
 	defer f.mu.Unlock()
 	return f.token, f.useToken
 }
-func (f *fakeClip) Formats() []transfer.Format { f.mu.Lock(); defer f.mu.Unlock(); return f.formats }
-func (f *fakeClip) NativeFormats() []string    { f.mu.Lock(); defer f.mu.Unlock(); return f.native }
-func (f *fakeClip) Owner() Owner               { f.mu.Lock(); defer f.mu.Unlock(); return f.owner }
+func (f *fakeClip) Formats() []transfer.Format {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.formatReads++
+	return f.formats
+}
+func (f *fakeClip) NativeFormats() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.formatReads++
+	return f.native
+}
+func (f *fakeClip) Owner() Owner { f.mu.Lock(); defer f.mu.Unlock(); return f.owner }
 func (f *fakeClip) ReadFormat(format transfer.Format) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -43,8 +56,14 @@ func (f *fakeClip) ReadFormat(format transfer.Format) ([]byte, error) {
 }
 func (f *fakeClip) Read(...transfer.Format) (transfer.Data, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.reads++
+	hook := f.onRead
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.readErrs) > 0 {
 		err := f.readErrs[0]
 		f.readErrs = f.readErrs[1:]
@@ -67,6 +86,12 @@ func (f *fakeClip) setFiles(paths ...string) {
 	f.token++
 	f.data, _ = transfer.FileData(paths...)
 	f.formats = f.data.Formats()
+}
+
+func (f *fakeClip) bump() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.token++
 }
 
 type monFixture struct {
@@ -283,7 +308,7 @@ func TestMonitorIgnorePatternSkips(t *testing.T) {
 	}
 }
 
-func textHash(s string) string { return history.Capture{Kind: history.KindText, Text: s}.Hash() }
+func textHash(s string) string { return history.Capture{Kind: history.TextKind(s), Text: s}.Hash() }
 
 func TestMonitorFingerprintDetectsFileListChange(t *testing.T) {
 	f := newMonFixture(t, false)
@@ -408,5 +433,111 @@ func TestMonitorSkipsIgnoredApp(t *testing.T) {
 	f.tick(t)
 	if l := f.list(t); !slices.Equal(l, []string{"from firefox"}) {
 		t.Errorf("list = %v", l)
+	}
+}
+
+func TestMonitorNewSurvivesInvalidIgnorePattern(t *testing.T) {
+	f := newMonFixture(t, true)
+	s := settings.Default()
+	s.IgnorePatterns = []string{"(", `^\d{4}$`}
+	f.m = New(f.clip, f.store, s, func() { f.n++ })
+	f.m.now = func() time.Time { return f.now }
+	f.clip.setText("1234")
+	f.tick(t)
+	if n := len(f.list(t)); n != 0 {
+		t.Fatalf("ignored text captured: %v", f.list(t))
+	}
+	f.clip.setText("12345")
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"12345"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorDropsReadThatRacedAClipboardChange(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("public")
+	f.clip.onRead = func() {
+		f.clip.onRead = nil // once: the change happens during the first read only
+		f.clip.setText("secret")
+		f.clip.native = []string{"org.nspasteboard.ConcealedType"}
+	}
+	f.tick(t)
+	f.tick(t)
+	if n := len(f.list(t)); n != 0 {
+		t.Errorf("entries = %v, want none", f.list(t))
+	}
+}
+
+func TestMonitorBusyClipboardRetriesBeforeMarkingSeen(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("hi")
+	f.clip.formats = nil // busy: no formats offered yet
+	f.tick(t)
+	f.tick(t)
+	f.clip.formats = f.clip.data.Formats()
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"hi"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorBusyClipboardAbandonsAfterRetries(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("hi")
+	f.clip.formats = nil
+	for range 3 {
+		f.tick(t)
+	}
+	f.clip.formats = f.clip.data.Formats() // back, but the change was already given up on
+	f.tick(t)
+	if n := len(f.list(t)); n != 0 {
+		t.Errorf("abandoned change captured: %v", f.list(t))
+	}
+}
+
+func TestMonitorReadErrorRetries(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("hi")
+	f.clip.readErrs = []error{errors.New("wl-paste: busy")}
+	f.tick(t)
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"hi"}) {
+		t.Errorf("list = %v", f.list(t))
+	}
+}
+
+func TestMonitorPausedTicksDoNotRead(t *testing.T) {
+	f := newMonFixture(t, false)
+	f.m.Pause(time.Hour)
+	f.clip.setText("hi")
+	for range 3 {
+		f.tick(t)
+	}
+	if f.clip.reads != 0 || f.clip.formatReads != 0 {
+		t.Errorf("reads = %d, formatReads = %d; want 0, 0", f.clip.reads, f.clip.formatReads)
+	}
+}
+
+func TestMonitorSkipsReannouncedContent(t *testing.T) {
+	f := newMonFixture(t, true)
+	f.clip.setText("a")
+	f.tick(t)
+	f.clip.bump() // same content, new token: a re-announce, not a new copy
+	f.tick(t)
+	l, err := f.store.List(f.ctx, history.Filter{Tab: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l) != 1 || l[0].UseCount != 1 {
+		t.Fatalf("entries = %d, use count = %v; want 1 entry used once", len(l), l)
+	}
+	if _, _, err := f.store.Delete(f.ctx, l[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	f.clip.bump()
+	f.tick(t)
+	if !slices.Equal(f.list(t), []string{"a"}) {
+		t.Errorf("deleted content not recaptured: %v", f.list(t))
 	}
 }

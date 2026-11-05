@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLoadSettingsMissingFileGivesDefaults(t *testing.T) {
@@ -76,10 +77,49 @@ func TestSaveSettingsRoundTrip(t *testing.T) {
 }
 
 func TestCompilePatternsNamesBadLine(t *testing.T) {
-	_, err := CompilePatterns([]string{`ok`, ``, `(unclosed`})
-	var pe *PatternError
-	if !errors.As(err, &pe) || pe.Line != 3 {
-		t.Errorf("err = %v", err)
+	kept, res, errs := CompilePatterns([]string{`ok`, ``, `(unclosed`})
+	if len(errs) != 1 || errs[0].Line != 3 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if !reflect.DeepEqual(kept, []string{"ok"}) || len(res) != 1 {
+		t.Errorf("kept = %q, %d regexps", kept, len(res))
+	}
+}
+
+func TestNormalizeDropsInvalidIgnorePattern(t *testing.T) {
+	s := Default()
+	s.IgnorePatterns = []string{"(", "ok"}
+	s.Normalize()
+	if !reflect.DeepEqual(s.IgnorePatterns, []string{"ok"}) {
+		t.Errorf("IgnorePatterns = %q", s.IgnorePatterns)
+	}
+}
+
+func TestLoadCorruptIsErrCorrupt(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	os.WriteFile(p, []byte(`{nope`), 0o600)
+	if _, err := Load(p); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("err = %v; want ErrCorrupt", err)
+	}
+}
+
+func TestQuarantineMovesCorruptFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	os.WriteFile(p, []byte(`{nope`), 0o600)
+	now := time.Date(2026, 11, 5, 14, 30, 12, 0, time.UTC)
+	got, err := Quarantine(p, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := p + ".bad-20261105-143012"; got != want {
+		t.Errorf("Quarantine = %q; want %q", got, want)
+	}
+	b, err := os.ReadFile(got)
+	if err != nil || string(b) != `{nope` {
+		t.Errorf("quarantined file = %q, %v", b, err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("original still present: %v", err)
 	}
 }
 

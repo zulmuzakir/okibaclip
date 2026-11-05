@@ -20,6 +20,14 @@ func TestExpand(t *testing.T) {
 		{"{unknown} {", "{unknown} {", 0},
 		{"héé{cursor}é!", "hééé!", 2},
 		{"no placeholders", "no placeholders", 0},
+		{"{nope {date}", "{nope 2025-03-04", 0},
+		{"{a {cursor}bc", "{a bc", 2},
+		{"{x{time}y", "{x15:06y", 0},
+		{"{cursor}e\u0301x", "e\u0301x", 2},
+		{"{cursor}\U0001F1FA\U0001F1F8!", "\U0001F1FA\U0001F1F8!", 2},
+		{"{cursor}\U0001F44D\U0001F3FD", "\U0001F44D\U0001F3FD", 1},
+		{"{cursor}a\r\nb", "a\r\nb", 3},
+		{"a{unknown}b", "a{unknown}b", 0},
 	} {
 		got, left := Expand(tc.in, now, nil)
 		if got != tc.want || left != tc.left {

@@ -1,6 +1,7 @@
 package history_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -209,9 +210,9 @@ func TestDeleteRestoreRoundTrip(t *testing.T) {
 	png := historytest.PNG(t, 5, 5)
 	id := historytest.Add(t, s, history.Capture{Kind: history.KindImage, Image: png, Width: 5, Height: 5}, historytest.T0)
 	id2 := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "hello", HTML: "<b>hello</b>"}, historytest.T0.Add(time.Second))
-	removed, err := s.Delete(ctx, id, id2)
-	if err != nil || len(removed) != 2 {
-		t.Fatalf("removed %d, %v", len(removed), err)
+	n, removed, err := s.Delete(ctx, id, id2)
+	if err != nil || n != 2 || len(removed) != 2 {
+		t.Fatalf("removed %d, %v", n, err)
 	}
 	if l, _ := s.List(ctx, history.Filter{Tab: "all"}); len(l) != 0 {
 		t.Fatal("not deleted")
@@ -278,7 +279,11 @@ func TestExportImportRoundTrip(t *testing.T) {
 	src.SetPinned(ctx, pid, true)
 	historytest.Add(t, src, history.Capture{Kind: history.KindImage, Image: png, Width: 6, Height: 6}, historytest.T0.Add(2*time.Second))
 	src.SaveSnippet(ctx, history.Snippet{Name: "n", Body: "b"})
-	f, err := src.Export(ctx)
+	var buf bytes.Buffer
+	if err := src.WriteExport(ctx, &buf); err != nil {
+		t.Fatal(err)
+	}
+	f, err := history.DecodeExport(buf.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,5 +374,75 @@ func TestImportTwiceKeepsUseCount(t *testing.T) {
 	l, _ := s.List(ctx, history.Filter{Tab: "all"})
 	if len(l) != 1 || l[0].UseCount != 5 {
 		t.Errorf("list = %+v", l)
+	}
+}
+
+func TestSearchScoresTitle(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id := historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "zzz"}, historytest.T0)
+	if err := s.SetTitle(ctx, id, "Deploy script"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx, history.Filter{Tab: "all", Query: query("deploy")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := historytest.Texts(list); !slices.Equal(got, []string{"zzz"}) {
+		t.Errorf("got %q, want [zzz]", got)
+	}
+}
+
+func TestAppFilterUnicodeCase(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "x", SourceApp: "ÉDITION"}, historytest.T0)
+	historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: "y", SourceApp: "other"}, historytest.T0.Add(time.Minute))
+	list, err := s.List(ctx, history.Filter{Tab: "all", Query: search.Query{Apps: []string{"édition"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := historytest.Texts(list); !slices.Equal(got, []string{"x"}) {
+		t.Errorf("got %q, want [x]", got)
+	}
+}
+
+func TestListTermsAttachThumbs(t *testing.T) {
+	s := historytest.NewStore(t)
+	ctx := context.Background()
+	id, _, err := s.Capture(ctx, history.Capture{Kind: history.KindImage, Image: historytest.PNG(t, 1, 1), Width: 1, Height: 1}, []byte{1, 2, 3}, historytest.T0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTitle(ctx, id, "cat"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx, history.Filter{Tab: "all", Query: query("cat")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !bytes.Equal(list[0].Thumb, []byte{1, 2, 3}) {
+		t.Errorf("result thumb = %v, want [1 2 3]", list)
+	}
+}
+
+func TestWriteExportStreamsAllEntries(t *testing.T) {
+	s := historytest.NewStore(t)
+	for i := range 450 {
+		historytest.Add(t, s, history.Capture{Kind: history.KindText, Text: fmt.Sprintf("e%d", i)}, historytest.T0.Add(time.Duration(i)*time.Minute))
+	}
+	var buf bytes.Buffer
+	if err := s.WriteExport(context.Background(), &buf); err != nil {
+		t.Fatal(err)
+	}
+	f, err := history.DecodeExport(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Entries) != 450 {
+		t.Fatalf("exported %d entries, want 450", len(f.Entries))
+	}
+	if f.Entries[0].Text != "e449" || f.Entries[449].Text != "e0" {
+		t.Errorf("order: first %q last %q, want newest first", f.Entries[0].Text, f.Entries[449].Text)
 	}
 }

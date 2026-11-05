@@ -14,8 +14,6 @@ import (
 	"okibaclip/internal/settings"
 )
 
-const maxHTMLBytes = 1 << 20
-
 func hasFormat(offered []transfer.Format, f transfer.Format) bool { return slices.Contains(offered, f) }
 
 // Classify turns clipboard data into a Capture per the capture rules. When
@@ -40,7 +38,7 @@ func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, p
 			}
 			c := history.Capture{Kind: history.TextKind(text), Text: text}
 			if c.Kind == history.KindText && hasFormat(offered, transfer.HTML) {
-				if h, err := d.Read(transfer.HTML); err == nil && len(h) > 0 && len(h) <= maxHTMLBytes {
+				if h, err := d.Read(transfer.HTML); err == nil && len(h) > 0 && len(h) <= history.MaxHTMLBytes {
 					c.HTML = string(h)
 				}
 			}
@@ -58,6 +56,9 @@ func Classify(d transfer.Data, offered []transfer.Format, s settings.Settings, p
 		cfg, err := png.DecodeConfig(bytes.NewReader(b))
 		if err != nil {
 			return history.Capture{}, "undecodable image", false
+		}
+		if !history.ImageDimsOK(cfg.Width, cfg.Height) {
+			return history.Capture{}, "image over 40 megapixels", false
 		}
 		return history.Capture{Kind: history.KindImage, Image: b, Width: cfg.Width, Height: cfg.Height}, "", true
 	}
@@ -86,7 +87,7 @@ func IsSensitive(native []string, portable []transfer.Format, readFormat func(tr
 	}
 	if slices.Contains(all, historyFlagFormat) && readFormat != nil {
 		b, err := readFormat(transfer.Format(historyFlagFormat))
-		if err == nil && len(b) == 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 {
+		if err == nil && len(b) >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 {
 			return true
 		}
 	}

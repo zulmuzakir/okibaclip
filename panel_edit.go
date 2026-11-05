@@ -23,6 +23,8 @@ func (a *app) openEntryEdit(e history.Entry, rename bool) {
 	a.async(func() {
 		full, err := a.store.Get(a.ctx, e.ID)
 		if err != nil {
+			slog.Error("open entry", "err", err)
+			a.post(func() { a.toast = "Could not open entry: " + err.Error() })
 			return
 		}
 		a.post(func() { open(full.Text) })
@@ -68,7 +70,7 @@ func (a *app) saveEntryEdit(andCopy bool) {
 			a.selected.Clear()
 			a.changed()
 			if andCopy && !rename {
-				a.copyEntry(history.Entry{ID: newID}, false)
+				a.copyEntry(history.Entry{ID: newID}, false, false)
 			}
 		})
 	})
@@ -157,6 +159,7 @@ func (a *app) reorderPinned(rows []int, to int) {
 	a.async(func() {
 		if err := a.store.ReorderPinned(a.ctx, ids); err != nil {
 			slog.Error("reorder", "err", err)
+			a.post(func() { a.toast = "Reorder failed: " + err.Error() })
 		}
 		a.post(a.changed)
 	})

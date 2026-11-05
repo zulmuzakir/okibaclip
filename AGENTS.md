@@ -29,7 +29,7 @@ flowchart LR
 - **Monitor (`internal/capture/monitor.go`):** polls the clipboard. It uses a change token on macOS and Windows (`token_*.go`, build-tagged) and a content fingerprint elsewhere. Captures upsert by content hash (`history.Capture.Hash`), then `Prune` runs.
 - **Search (`internal/search`, `history.List`):**
   - `app.reload` runs `search.Parse(a.query, time.Now())`. The result has terms (words and `"phrases"`) and filters (`type:`, `is:`, `after:`, `before:`). The query the current results answer is kept in `a.shown`; highlights and the result count read from it.
-  - `history.List` prefilters in SQL: tab and filters, `instr(search, term)` for substrings, and `substr(search,1,512) LIKE '%t%e%r%m%'` for fuzzy candidates. It then ranks in Go with `search.Score`. List rows hold only the first 4000 characters of the text, so each term also returns a whole-text `instr` flag. Keep both parts in step when changing matching.
+  - `history.List` prefilters in SQL: tab, kind, pinned and date filters, `instr(search, term)` for substrings, and `substr(search, 1, FuzzyWindow + title + 1) LIKE '%t%e%r%m%'` for fuzzy candidates (the window skips past the title, which `searchFor` prefixes with a newline). App filters and title scoring run in Go: `matchesApps` (case-folded, Unicode-safe) and `search.Score` on the text and the title, keeping the best. Ranked queries load thumbnails only for the returned rows (`attachThumbs`). List rows hold only the first 4000 characters of the text, so each term also returns a whole-text `instr` flag. Keep both parts in step when changing matching.
   - The UI highlights matches with `search.Highlight` (byte ranges), rendered as `ui.RichText` spans in `app.highlighted`.
   - The search field takes Enter, so `OnTextKey` copies the chosen row on ↵ / ⇧↵ (plain).
 - **Copy-back (`copy.go`):**
@@ -45,7 +45,7 @@ flowchart LR
 
 | Path | Purpose |
 |---|---|
-| `/` (package `main`) | App wiring and all UI: `app.go`, `panel*.go`, `settings_view.go`, `tray*.go`, `copy.go`, `format.go`, `icons.go` (Lucide icons), `platform.go` |
+| `/` (package `main`) | App wiring and all UI: `main.go` (entry point), `app.go` (state, lifecycle), `panel.go` (view), `panel_list.go` (history rows), `panel_preview.go` (preview pane, entry menu), `panel_snippets.go` (snippets tab and editor), `panel_edit.go`, `actions.go` (copy, delete, undo, pin and toasts), `shortcut.go` (global hotkeys), `widgets.go` (shared buttons, banners, settings rows), `settings_view.go`, `exportimport.go`, `tray*.go`, `copy.go`, `format.go`, `icons.go` (Lucide icons), `platform.go` |
 | `internal/capture/` | Clipboard polling, classification, sensitivity checks, per-OS change tokens |
 | `internal/history/` | SQLite store (`store.go`), entries/thumbnails (`entry.go`), snippets, export format |
 | `internal/history/historytest/` | Test fixtures: `T0`, `NewStore(t)`, `Add`, `PNG`, `Texts` |
@@ -109,7 +109,7 @@ Format with `gofmt`. There is no other linter.
 - `panel.go`, `panel_snippets.go`: panel UI (search, tabs, list, preview, context menu, snippet editor).
 - `copy.go`: clipboard write-back and suppression.
 - `internal/capture/monitor.go`, `classify.go`: the capture pipeline.
-- `internal/history/store.go`: versioned migrations (`migrations`, schema v2), `Capture` upsert, `Prune` (count, age and storage budget) and `Compact`, search.
+- `internal/history/store.go`: versioned migrations (`migrations`, schema v3), `Capture` upsert, `Prune` (count, age and storage budget) and `Compact`, search.
 - `internal/capture/owner_*.go`: source-app lookup per OS; `wayland_linux.go`: `wl-paste` capture on data-control compositors.
 - `internal/paste/`: opt-in paste keystroke; `internal/placeholder/`: snippet placeholders.
 - `go.mod`: Go 1.27.3; `tool github.com/egoist/mygo/cmd/mygo` (this is what enables `go tool mygo`).

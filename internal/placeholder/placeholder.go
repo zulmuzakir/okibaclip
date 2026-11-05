@@ -5,13 +5,17 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-text/typesetting/segmenter"
 )
 
 // Expand replaces placeholders in body: {date}, {time}, {datetime},
 // {clipboard} and {cursor}. "{{" is a literal "{", and unknown {…} stays as
-// written. clipboard is called at most once. left is the number of runes
-// after the first {cursor} in the result (0 when there is none), i.e. how
-// far to move the caret back after pasting.
+// written. A "{" inside a brace pair that is not a placeholder is literal,
+// and placeholders after it still expand ("{x{time}" → "{x15:06"). clipboard
+// is called at most once. left is the number of user-perceived characters
+// (grapheme clusters) after the first {cursor} in the result (0 when there
+// is none), i.e. how far to move the caret back after pasting.
 func Expand(body string, now time.Time, clipboard func() string) (text string, left int) {
 	var out strings.Builder
 	var clip string
@@ -32,6 +36,11 @@ func Expand(body string, now time.Time, clipboard func() string) (text string, l
 		if end < 0 {
 			out.WriteString(body[i:])
 			break
+		}
+		if strings.IndexByte(body[i+1:i+end], '{') >= 0 {
+			out.WriteByte('{') // unmatched brace: literal; placeholders inside still expand
+			i++
+			continue
 		}
 		name := body[i+1 : i+end]
 		switch name {
@@ -60,7 +69,20 @@ func Expand(body string, now time.Time, clipboard func() string) (text string, l
 	}
 	text = out.String()
 	if haveCursor {
-		left = utf8.RuneCountInString(text[cursorAt:])
+		left = countGraphemes(text[cursorAt:])
 	}
 	return text, left
+}
+
+// countGraphemes returns the number of UAX #29 grapheme clusters in s ("\r\n" is one); invalid input falls back to runes.
+func countGraphemes(s string) int {
+	var seg segmenter.Segmenter
+	if err := seg.InitWithString(s); err != nil {
+		return utf8.RuneCountInString(s)
+	}
+	n := 0
+	for it := seg.GraphemeIterator(); it.Next(); {
+		n++
+	}
+	return n
 }

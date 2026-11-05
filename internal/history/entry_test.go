@@ -47,3 +47,18 @@ func TestTextKind(t *testing.T) {
 		}
 	}
 }
+
+func TestMakeThumbRejectsTooManyPixels(t *testing.T) {
+	if _, err := history.MakeThumb(historytest.PNGHeader(8001, 5001)); err != history.ErrTooManyPixels {
+		t.Errorf("err = %v, want ErrTooManyPixels", err)
+	}
+}
+
+func TestImageDimsOKBoundary(t *testing.T) {
+	if !history.ImageDimsOK(8000, 5000) {
+		t.Error("8000x5000 rejected")
+	}
+	if history.ImageDimsOK(8001, 5001) {
+		t.Error("8001x5001 accepted")
+	}
+}

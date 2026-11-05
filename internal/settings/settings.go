@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"slices"
@@ -35,6 +36,9 @@ type Settings struct {
 // PollIntervals are the allowed clipboard poll intervals, in milliseconds.
 var PollIntervals = []int{250, 500, 1000}
 
+// ErrCorrupt marks a settings file that exists but is not valid JSON.
+var ErrCorrupt = errors.New("settings file is corrupt")
+
 // PatternError reports an ignore pattern that does not compile.
 type PatternError struct {
 	Line int
@@ -59,7 +63,7 @@ func Default() Settings {
 }
 
 // Load reads path over the defaults. A missing file is not an
-// error; a corrupt one returns the defaults and the error.
+// error; a corrupt one (wrapping ErrCorrupt) returns the defaults and the error.
 func Load(path string) (Settings, error) {
 	s := Default()
 	b, err := os.ReadFile(path)
@@ -72,13 +76,23 @@ func Load(path string) (Settings, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		s = Default()
 		s.Normalize()
-		return s, fmt.Errorf("settings %s: %w", path, err)
+		return s, fmt.Errorf("%w: %s: %w", ErrCorrupt, path, err)
 	}
 	s.Normalize()
 	return s, nil
 }
 
-// Normalize clamps values to their ranges and drops blank patterns.
+// Quarantine renames path to path+".bad-"+now.Format("20060102-150405") and returns the new path.
+func Quarantine(path string, now time.Time) (string, error) {
+	bad := path + ".bad-" + now.Format("20060102-150405")
+	if err := os.Rename(path, bad); err != nil {
+		return "", err
+	}
+	return bad, nil
+}
+
+// Normalize clamps values to their ranges, drops ignore patterns that do not
+// compile (logging each one) and normalizes the ignored app names.
 func (s *Settings) Normalize() {
 	s.MaxEntries = min(max(s.MaxEntries, 50), 5000)
 	s.RetentionDays = min(max(s.RetentionDays, 0), 3650)
@@ -87,13 +101,11 @@ func (s *Settings) Normalize() {
 	if !slices.Contains(PollIntervals, s.PollMillis) {
 		s.PollMillis = 500
 	}
-	var keep []string
-	for _, l := range s.IgnorePatterns {
-		if strings.TrimSpace(l) != "" {
-			keep = append(keep, l)
-		}
+	kept, _, bad := CompilePatterns(s.IgnorePatterns)
+	for _, e := range bad {
+		slog.Warn("ignore pattern dropped", "line", e.Line, "pattern", s.IgnorePatterns[e.Line-1], "err", e.Err)
 	}
-	s.IgnorePatterns = keep
+	s.IgnorePatterns = kept
 
 	var apps []string
 	for _, a := range s.IgnoreApps {
@@ -119,19 +131,21 @@ func Save(path string, s Settings) error {
 	return fsutil.WriteFileAtomic(path, b)
 }
 
-// CompilePatterns compiles one regexp per line; blank lines are skipped
-// and the error names the first bad line (1-based, counting blanks).
-func CompilePatterns(lines []string) ([]*regexp.Regexp, error) {
-	var out []*regexp.Regexp
+// CompilePatterns compiles each non-blank line. kept holds the lines that
+// compile, in order; res their regexps; errs one *PatternError per bad line
+// (Line is 1-based and counts blank lines).
+func CompilePatterns(lines []string) (kept []string, res []*regexp.Regexp, errs []*PatternError) {
 	for i, l := range lines {
 		if strings.TrimSpace(l) == "" {
 			continue
 		}
 		re, err := regexp.Compile(l)
 		if err != nil {
-			return nil, &PatternError{Line: i + 1, Err: err}
+			errs = append(errs, &PatternError{Line: i + 1, Err: err})
+			continue
 		}
-		out = append(out, re)
+		kept = append(kept, l)
+		res = append(res, re)
 	}
-	return out, nil
+	return kept, res, errs
 }

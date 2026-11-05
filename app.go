@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -53,10 +52,21 @@ type hotkeyRegistry interface {
 
 // paster sends the paste keystroke to the app the user came from.
 type paster interface {
-	Remember()
+	Remember() paste.Target
 	Trusted(prompt bool) bool
-	Paste(left int) error
+	Paste(t paste.Target, left int) error
 }
+
+// rememberTarget records the window a paste will go to. It runs only while the
+// panel is hidden, so the window in front is the user's previous app.
+func (a *app) rememberTarget() {
+	if a.panelHidden() {
+		a.pasteTarget = a.paster.Remember()
+	}
+}
+
+// panelHiddenNow is the default panelHidden: a panel exists and is hidden.
+func (a *app) panelHiddenNow() bool { return a.panel != nil && !a.panel.IsVisible() }
 
 // listLimit is the most history rows the panel lists.
 const listLimit = 1000
@@ -83,9 +93,12 @@ type app struct {
 	mon     captureControl
 	cfg     settings.Settings
 	cfgPath string
+	cfgErr  string // persistent banner when settings.json could not be read
 	dataDir string
 	ctx     context.Context
 	cancel  context.CancelFunc
+	jobs    sync.WaitGroup // goroutines started by async; awaited at quit
+	monDone chan struct{}  // closed when the capture monitor's Run returns
 	src     capture.Source
 
 	// View state, on the main thread.
@@ -102,6 +115,9 @@ type app struct {
 	previewBitmap          *ui.Bitmap
 	previewStats           string // textStats of preview
 	previewCode            bool   // preview's text looksLikeCode
+	previewBody            string // first 20000 runes of preview's text, cut off in loadPreview
+	previewMore            int    // runes of preview's text past previewBody
+	snipPrev               snipPreview
 	syntaxOpen             bool
 	thumbs                 map[int64]*ui.Bitmap
 	gen                    uint64
@@ -131,9 +147,9 @@ type app struct {
 		saving bool
 	}
 	snipFolders   []string
-	snipFolder    string           // "" = all folders, noFolder, or a folder
-	snipFolderSel string           // the select's label for snipFolder
-	snipKeys      map[string]int64 // registered snippet accelerators -> snippet id
+	snipFolder    string                // "" = all folders, noFolder, or a folder
+	snipFolderSel string                // the select's label for snipFolder
+	snipKeys      map[string]snipHotkey // registered snippet accelerators (accel.Key form) -> snippet
 	appIcons      map[string]*ui.Bitmap
 	listStale     bool   // the query or tab changed and its results haven't landed
 	afterList     func() // runs once fresh results land
@@ -160,8 +176,11 @@ type app struct {
 	writeClipboard func(transfer.Data) error
 	hotkeys        hotkeyRegistry
 	paster         paster
+	pasteTarget    paste.Target
+	panelHidden    func() bool // test seam for rememberTarget
 	fileIcon       func(path string, size int) ([]byte, error)
 	saveDialog     func(mygo.SaveDialogOptions) (string, error)
+	openDialog     func(mygo.OpenDialogOptions) ([]string, error)
 
 	settingsUI settingsState
 }
@@ -171,20 +190,26 @@ func newApp() *app {
 		ctx:        context.Background(),
 		thumbs:     map[int64]*ui.Bitmap{},
 		appIcons:   map[string]*ui.Bitmap{},
-		snipKeys:   map[string]int64{},
+		snipKeys:   map[string]snipHotkey{},
 		src:        capture.SystemClipboard{},
 		hotkeys:    mygo.GlobalShortcut,
 		paster:     paste.System{},
 		fileIcon:   mygo.Shell.FileIcon,
 		saveDialog: mygo.Dialog.Save,
+		openDialog: mygo.Dialog.Open,
 		cfg:        settings.Default(),
 	}
-	a.async = func(fn func()) { go fn() }
+	a.panelHidden = a.panelHiddenNow
+	a.async = func(fn func()) {
+		a.jobs.Add(1)
+		go func() {
+			defer a.jobs.Done()
+			fn()
+		}()
+	}
 	a.post = func(fn func()) {
 		if a.panel != nil {
 			a.panel.Update(fn)
-		} else {
-			fn()
 		}
 	}
 	a.writeClipboard = func(d transfer.Data) error { return mygo.Clipboard.Write(d) }
@@ -210,8 +235,21 @@ func (a *app) ready() {
 	}
 	a.cfgPath = filepath.Join(dir, "settings.json")
 	cfg, err := settings.Load(a.cfgPath)
-	if err != nil {
-		slog.Warn("settings", "err", err)
+	switch {
+	case errors.Is(err, settings.ErrCorrupt):
+		bad, qerr := settings.Quarantine(a.cfgPath, time.Now())
+		if qerr != nil {
+			slog.Error("settings quarantine", "err", qerr)
+			a.cfgErr = "Settings were unreadable and could not be moved aside, so changes won't be saved."
+			a.cfgPath = ""
+		} else {
+			slog.Warn("settings", "err", err, "moved_to", bad)
+			a.cfgErr = "Settings were unreadable and were reset to defaults. The old file was kept as " + filepath.Base(bad) + "."
+		}
+	case err != nil:
+		slog.Error("settings", "err", err)
+		a.cfgErr = "Settings could not be read, so changes won't be saved: " + err.Error()
+		a.cfgPath = ""
 	}
 	a.cfg = cfg
 	ctx, cancel := context.WithCancel(context.Background())
@@ -259,12 +297,17 @@ func (a *app) ready() {
 	a.async(a.cleanImageFiles)
 	m := capture.New(a.src, a.store, a.cfg, func() { a.post(a.changed) })
 	a.mon = m
-	go m.Run(ctx)
+	done := make(chan struct{})
+	a.monDone = done
+	go func() {
+		defer close(done)
+		m.Run(ctx)
+	}()
 
 	shown := a.command(os.Args[1:], false)
-	if !shown && !mygo.App.WasOpenedAtLogin() && (!a.cfg.FirstRunDone || a.trayErr != "") {
+	if !shown && startShowsPanel(mygo.App.WasOpenedAtLogin(), a.cfg.FirstRunDone, a.trayErr, a.shortcut) {
 		a.show(fromHotkey)
-		if !a.cfg.FirstRunDone {
+		if !a.cfg.FirstRunDone && a.cfgPath != "" {
 			a.cfg.FirstRunDone = true
 			if err := settings.Save(a.cfgPath, a.cfg); err != nil {
 				slog.Error("save settings", "err", err)
@@ -276,11 +319,32 @@ func (a *app) ready() {
 
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
 		a.cancel()
+		if !waitBackground(2*time.Second, a.monDone, &a.jobs) {
+			slog.Warn("shutdown: background work still running")
+		}
 		if a.tray != nil {
 			a.tray.Destroy()
 		}
 		a.store.Close()
 	})
+}
+
+// waitBackground waits for done (nil = already finished) and then for jobs, giving up after d. It reports whether everything finished in time.
+func waitBackground(d time.Duration, done <-chan struct{}, jobs *sync.WaitGroup) bool {
+	finished := make(chan struct{})
+	go func() {
+		if done != nil {
+			<-done
+		}
+		jobs.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // ---- panel ----
@@ -294,7 +358,7 @@ func (a *app) show(o origin) {
 	a.selected.Clear()
 	a.toast, a.toastUndo = "", nil
 	a.footerNote, a.hint = a.hint, ""
-	a.paster.Remember()
+	a.rememberTarget()
 	a.syntaxOpen = false
 	a.requery()
 	a.search.Focus()
@@ -409,12 +473,12 @@ func (a *app) requery() { a.listStale = true; a.reload() }
 
 // changed is called after the data changed: reload the list and tray data.
 func (a *app) changed() {
-	a.preview = history.Entry{}
+	a.clearPreview()
 	if a.panel == nil || a.panel.IsVisible() {
 		a.reload()
 	}
 	a.refreshData()
-	if a.settingsWin != nil {
+	if a.settingsWin != nil && a.settingsWin.IsVisible() {
 		a.refreshStats()
 	}
 }
@@ -516,7 +580,7 @@ func (a *app) loadPreview() {
 	a.previewGen++
 	gen := a.previewGen
 	if a.tab == tabSnippets || a.chosen < 0 || a.chosen >= len(a.items) {
-		a.preview, a.previewBitmap, a.previewStats, a.previewCode = history.Entry{}, nil, "", false
+		a.clearPreview()
 		return
 	}
 	id := a.items[a.chosen].ID
@@ -539,6 +603,7 @@ func (a *app) loadPreview() {
 			// DecodeBitmap only builds pixels and touches no window or GPU state (mygo ui/bitmap.go).
 			bmp, _ = ui.DecodeBitmap(e.Image)
 		}
+		body, more := truncateRunes(e.Text, 20000)
 		a.post(func() {
 			if gen != a.previewGen {
 				return
@@ -546,6 +611,7 @@ func (a *app) loadPreview() {
 			a.preview = e
 			a.previewStats, a.previewCode = stats, code
 			a.previewBitmap = bmp
+			a.previewBody, a.previewMore = body, more
 		})
 	})
 }
@@ -595,147 +661,20 @@ func (a *app) command(args []string, second bool) (shown bool) {
 	return shown
 }
 
-var defaultShortcuts = []string{"Alt+Shift+V", "CmdOrCtrl+Alt+Shift+V"}
-
-func (a *app) onHotkey() { a.post(func() { a.toggle(fromHotkey) }) }
-
-func (a *app) registerShortcut() {
-	cands := defaultShortcuts
-	if a.cfg.Shortcut != "" {
-		cands = []string{a.cfg.Shortcut}
-	}
-	a.shortcut, a.shortcutErr = "", ""
-	for _, s := range cands {
-		if err := a.hotkeys.Register(s, a.onHotkey); err != nil {
-			slog.Warn("shortcut unavailable", "accelerator", s, "err", err)
-			a.shortcutErr = err.Error()
-			continue
-		}
-		a.shortcut, a.shortcutErr = s, ""
-		return
-	}
-}
-
-// applyShortcut replaces the global shortcut; on failure the old one stays.
-func (a *app) applyShortcut(acc string) error {
-	acc = strings.TrimSpace(acc)
-	old := a.shortcut
-	if old != "" {
-		a.hotkeys.Unregister(old)
-	}
-	restore := func() {
-		if old == "" {
-			return
-		}
-		if err := a.hotkeys.Register(old, a.onHotkey); err != nil {
-			slog.Warn("shortcut restore failed", "accelerator", old, "err", err)
-			a.shortcut, a.shortcutErr = "", err.Error()
-			return
-		}
-		a.shortcut = old
-	}
-	if acc == "" {
-		prev := a.cfg.Shortcut
-		a.cfg.Shortcut = ""
-		a.registerShortcut()
-		if a.shortcut == "" {
-			a.cfg.Shortcut = prev
-			failure := errors.New(a.shortcutErr)
-			restore()
-			return failure
-		}
-		return nil
-	}
-	if err := a.hotkeys.Register(acc, a.onHotkey); err != nil {
-		restore()
-		return err
-	}
-	a.shortcut, a.shortcutErr = acc, ""
-	return nil
-}
-
 // ---- undo & shared helpers ----
-
-func (a *app) undoDelete() {
-	entries := a.toastUndo
-	a.toastUndo = nil
-	if len(entries) == 0 {
-		return
-	}
-	a.async(func() {
-		if err := a.store.Restore(a.ctx, entries); err != nil {
-			slog.Error("restore", "err", err)
-		}
-		a.post(a.changed)
-	})
-}
-
-// deleteEntries removes entries and offers Undo.
-func (a *app) deleteEntries(ids []int64) {
-	if len(ids) == 0 {
-		return
-	}
-	a.async(func() {
-		removed, err := a.store.Delete(a.ctx, ids...)
-		if err != nil {
-			slog.Error("delete", "err", err)
-			return
-		}
-		a.post(func() {
-			a.selected.Clear()
-			a.toast = deletedMessage(len(removed))
-			a.toastUndo = removed
-			a.changed()
-		})
-	})
-}
-
-func deletedMessage(n int) string {
-	if n == 1 {
-		return "Entry deleted"
-	}
-	return fmt.Sprintf("%d entries deleted", n)
-}
-
-func (a *app) setPinned(id int64, pinned bool) {
-	a.async(func() {
-		if err := a.store.SetPinned(a.ctx, id, pinned); err != nil {
-			slog.Error("pin", "err", err)
-			return
-		}
-		a.post(a.changed)
-	})
-}
-
-// confirmClear asks, then clears history except pinned entries.
-func (a *app) confirmClear(parent *mygo.Window) {
-	a.async(func() {
-		res, err := mygo.Dialog.Message(mygo.MessageOptions{
-			Parent: parent, Type: mygo.MessageWarning, Title: "Clear History",
-			Message:            "Clear clipboard history?",
-			Detail:             "Pinned entries and snippets are kept.",
-			Buttons:            []string{"Clear History", "Cancel"},
-			DefaultButton:      1,
-			CancelButton:       1,
-			DestructiveButtons: []int{0},
-		})
-		if err != nil || res.Button != 0 {
-			return
-		}
-		if _, err := a.store.Clear(a.ctx, true); err != nil {
-			slog.Error("clear", "err", err)
-			return
-		}
-		if err := a.store.Compact(a.ctx); err != nil {
-			slog.Error("compact", "err", err)
-		}
-		a.post(a.changed)
-	})
-}
 
 func (a *app) paused() (bool, time.Time) {
 	if a.mon == nil {
 		return false, time.Time{}
 	}
 	return a.mon.Paused()
+}
+
+// startShowsPanel reports whether the panel opens at startup; with neither a
+// tray nor a shortcut it is the only way in, even at login.
+func startShowsPanel(login, firstRunDone bool, trayErr, shortcut string) bool {
+	if trayErr != "" && shortcut == "" {
+		return true
+	}
+	return !login && (!firstRunDone || trayErr != "")
 }

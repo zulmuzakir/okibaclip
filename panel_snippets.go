@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"okibaclip/internal/accel"
 	"okibaclip/internal/history"
 )
 
@@ -44,7 +45,7 @@ func (a *app) snippetList(c *ui.Context) {
 					a.highlighted(c, s.Name, hl).SingleLine().TextColor(text)
 					a.highlighted(c, textPreview(s.Body, 80), hl).FontSize(11).SingleLine().TextColor(muted)
 				})
-				if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+				if _, _, ok := a.snippetHotkey(s.ID); ok {
 					ui.Text(c, keys(s.Shortcut)).FontSize(10).TextColor(muted)
 				}
 			})
@@ -61,18 +62,22 @@ func (a *app) snippetList(c *ui.Context) {
 // preview's More actions button. A choice is noted in a.pending.
 func (a *app) snippetMenu(m *ui.Menu, s history.Snippet) {
 	if m.Item("Copy").Chosen() {
-		a.pending = func() { a.copySnippet(s) }
+		a.pending = func() { a.copySnippet(s, false) }
 	}
 	if m.Item("Edit…").Chosen() {
-		a.pending = func() {
-			a.editor.open, a.editor.id, a.editor.name, a.editor.body, a.editor.err = true, s.ID, s.Name, s.Body, ""
-			a.editor.folder, a.editor.shortcut = s.Folder, s.Shortcut
-		}
+		a.pending = func() { a.openSnippetEditor(s) }
 	}
 	m.Separator()
 	if m.Item("Delete").Chosen() {
 		a.pending = func() { a.deleteSnippet(s) }
 	}
+}
+
+// snipPreview caches the snippet preview's display text; it is recomputed only when the chosen snippet or its source changes.
+type snipPreview struct {
+	id   int64
+	src  string
+	body string
 }
 
 func (a *app) snippetPreview(c *ui.Context) {
@@ -90,11 +95,19 @@ func (a *app) snippetPreview(c *ui.Context) {
 		}
 		ui.Text(c, kind).FontSize(12).TextColor(t.TextMuted).SingleLine().Grow(1)
 		iconButton(c, iconMore, "More actions", "More actions", t.TextMuted).Menu(func(m *ui.Menu) { a.snippetMenu(m, s) })
-		ui.PrimaryButton(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copySnippet(s) })
+		ui.PrimaryButton(c, "Copy").Tooltip("Copy (↵)").OnClick(func() { a.copySnippet(s, false) })
 	})
 	a.highlighted(c, s.Name, hl).Bold().FontSize(15)
+	src := strings.TrimRight(s.Body, "\n")
+	if a.snipPrev.id != s.ID || a.snipPrev.src != src {
+		head, more := truncateRunes(src, 20000)
+		if more > 0 {
+			head += fmt.Sprintf("… (%d more characters)", more)
+		}
+		a.snipPrev = snipPreview{id: s.ID, src: src, body: head}
+	}
 	ui.Scroll(c).Grow(1).Children(func() {
-		a.highlighted(c, strings.TrimRight(s.Body, "\n"), hl).Wrap().Selectable()
+		a.highlighted(c, a.snipPrev.body, hl).Wrap().Selectable()
 	})
 	ui.Text(c, a.snippetDetails(s)).FontSize(11).TextColor(t.TextMuted).Wrap()
 	// A More actions choice is reported while this pane builds.
@@ -105,7 +118,7 @@ func (a *app) snippetPreview(c *ui.Context) {
 // when registered, and how often it was used.
 func (a *app) snippetDetails(s history.Snippet) string {
 	parts := []string{fmt.Sprintf("%d characters", utf8.RuneCountInString(s.Body))}
-	if s.Shortcut != "" && a.snipKeys[s.Shortcut] == s.ID {
+	if _, _, ok := a.snippetHotkey(s.ID); ok {
 		parts = append(parts, "shortcut "+keys(s.Shortcut))
 	}
 	switch {
@@ -181,27 +194,28 @@ func (a *app) folderSelect(c *ui.Context) {
 	})
 }
 
-// fireSnippet copies the snippet registered under accelerator acc.
-func (a *app) fireSnippet(acc string) {
-	id, ok := a.snipKeys[acc]
+// fireSnippet copies the snippet registered under key (an accel.Key form).
+// Hotkey callbacks already run on the main thread.
+func (a *app) fireSnippet(key string) {
+	h, ok := a.snipKeys[key]
 	if !ok {
 		return
 	}
-	a.paster.Remember() // the panel is usually hidden: remember the app in front now
+	a.rememberTarget() // the panel is usually hidden: remember the app in front now
 	a.async(func() {
-		s, err := a.store.Snippet(a.ctx, id)
+		s, err := a.store.Snippet(a.ctx, h.id)
 		if err != nil {
 			return
 		}
-		a.post(func() { a.copySnippet(s) })
+		a.copySnippet(s, false)
 	})
 }
 
 // registerSnippetShortcuts (re)registers every snippet's global shortcut.
 // Failures are logged and leave the snippet without one.
 func (a *app) registerSnippetShortcuts() {
-	for acc := range a.snipKeys {
-		a.hotkeys.Unregister(acc)
+	for _, h := range a.snipKeys {
+		a.hotkeys.Unregister(h.acc)
 	}
 	clear(a.snipKeys)
 	a.async(func() {
@@ -218,17 +232,115 @@ func (a *app) registerSnippetShortcuts() {
 				if acc == "" {
 					continue
 				}
-				if _, dup := a.snipKeys[acc]; dup || strings.EqualFold(acc, a.shortcut) {
+				key := accel.Key(acc)
+				if _, dup := a.snipKeys[key]; dup || key == accel.Key(a.shortcut) {
 					slog.Warn("snippet shortcut", "accelerator", acc, "err", "already in use")
 					continue
 				}
-				if err := a.hotkeys.Register(acc, func() { a.post(func() { a.fireSnippet(acc) }) }); err != nil {
+				if err := a.hotkeys.Register(acc, func() { a.fireSnippet(key) }); err != nil {
 					slog.Warn("snippet shortcut", "accelerator", acc, "err", err)
 					continue
 				}
-				a.snipKeys[acc] = s.ID
+				a.snipKeys[key] = snipHotkey{acc: acc, id: s.ID}
 			}
 			a.refreshTray()
+		})
+	})
+}
+
+func (a *app) openSnippetEditor(s history.Snippet) {
+	if a.tab != tabSnippets {
+		a.setTab(tabSnippets)
+	}
+	a.editor.open, a.editor.id, a.editor.name, a.editor.body, a.editor.err = true, s.ID, s.Name, s.Body, ""
+	a.editor.folder, a.editor.shortcut = s.Folder, s.Shortcut
+}
+
+// newSnippet opens the editor for a new snippet prefilled with name and body.
+func (a *app) newSnippet(name, body string) {
+	a.openSnippetEditor(history.Snippet{Name: name, Body: body})
+}
+
+func (a *app) saveAsSnippet(e history.Entry) {
+	a.async(func() {
+		full, err := a.store.Get(a.ctx, e.ID)
+		if err != nil {
+			slog.Error("save as snippet", "err", err)
+			a.post(func() { a.toast = "Could not read entry: " + err.Error() })
+			return
+		}
+		name := textPreview(full.Text, 40)
+		if e.Kind != history.KindText {
+			name = preview(full)
+		}
+		name = firstRunes(name, 40)
+		a.post(func() { a.newSnippet(name, full.Text) })
+	})
+}
+
+func (a *app) saveEditor() {
+	name := firstRunes(strings.TrimSpace(a.editor.name), 100)
+	switch {
+	case name == "":
+		a.editor.err = "Name is required"
+		return
+	case strings.TrimSpace(a.editor.body) == "":
+		a.editor.err = "Body is required"
+		return
+	case len(a.editor.body) > history.MaxTextBytes:
+		a.editor.err = "Body is over 1 MiB"
+		return
+	}
+	acc := strings.TrimSpace(a.editor.shortcut)
+	key := accel.Key(acc)
+	if key != "" {
+		if key == accel.Key(a.shortcut) {
+			a.editor.err = "That shortcut opens the panel"
+			return
+		}
+		if h, ok := a.snipKeys[key]; ok && h.id != a.editor.id {
+			a.editor.err = "That shortcut belongs to another snippet"
+			return
+		}
+	}
+	sn := history.Snippet{ID: a.editor.id, Name: name, Body: a.editor.body, Folder: firstRunes(strings.TrimSpace(a.editor.folder), 100), Shortcut: acc}
+	if a.editor.saving {
+		return
+	}
+	oldKey, old, hadOld := a.snippetHotkey(a.editor.id)
+	newly := key != "" && key != oldKey
+	if newly {
+		if err := a.hotkeys.Register(acc, func() { a.fireSnippet(key) }); err != nil {
+			a.editor.err = "Shortcut unavailable: " + err.Error()
+			return
+		}
+	}
+	a.editor.saving, a.editor.err = true, ""
+	a.async(func() {
+		id, err := a.store.SaveSnippet(a.ctx, sn)
+		a.post(func() {
+			a.editor.saving = false
+			if err != nil {
+				slog.Error("save snippet", "err", err)
+				a.editor.err = "Save failed: " + err.Error()
+				if newly {
+					a.hotkeys.Unregister(acc)
+				}
+				return
+			}
+			if hadOld && oldKey != key {
+				a.hotkeys.Unregister(old.acc)
+				delete(a.snipKeys, oldKey)
+			}
+			if key != "" {
+				h := snipHotkey{acc: acc, id: id}
+				if !newly {
+					h.acc = old.acc // still registered under the spelling it was given
+				}
+				a.snipKeys[key] = h
+			}
+			a.editor.open = false
+			a.changed()
 		})
 	})
 }

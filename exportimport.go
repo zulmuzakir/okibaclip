@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,20 +14,9 @@ import (
 	"okibaclip/internal/history"
 )
 
-// exportTo writes the whole history and snippets to path as JSON.
-func (a *app) exportTo(ctx context.Context, path string) (size int, err error) {
-	f, err := a.store.Export(ctx)
-	if err != nil {
-		return 0, err
-	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return 0, err
-	}
-	if err := fsutil.WriteFileAtomic(path, b); err != nil {
-		return 0, err
-	}
-	return len(b), nil
+// exportTo streams the whole history and snippets to path as JSON.
+func (a *app) exportTo(ctx context.Context, path string) error {
+	return fsutil.WriteFileAtomicFunc(path, func(w io.Writer) error { return a.store.WriteExport(ctx, w) })
 }
 
 // importFrom merges an export file into the store and applies retention.
@@ -62,12 +50,12 @@ func (a *app) importFrom(ctx context.Context, path string, l history.Limits) (en
 	return
 }
 
+// postSettings runs fn on the settings window's thread; with no window open
+// there is nothing to update, so fn is dropped.
 func (a *app) postSettings(fn func()) {
 	if a.settingsWin != nil {
 		a.settingsWin.Update(fn)
-		return
 	}
-	fn()
 }
 
 func (a *app) exportData() {
@@ -79,15 +67,18 @@ func (a *app) exportData() {
 			DefaultPath: history.ExportFormat + "-" + time.Now().Format("2006-01-02") + ".json",
 			Filters:     []mygo.FileFilter{{Name: "JSON", Extensions: []string{"json"}}},
 		})
-		if err != nil || path == "" {
+		if err != nil {
+			slog.Error("export dialog", "err", err)
+			a.postSettings(func() { a.settingsUI.toast = "Export failed: " + err.Error() })
+			return
+		}
+		if path == "" {
 			return
 		}
 		msg := "Exported to " + path
-		if size, err := a.exportTo(a.ctx, path); err != nil {
+		if err := a.exportTo(a.ctx, path); err != nil {
 			slog.Error("export", "err", err)
 			msg = "Export failed: " + err.Error()
-		} else if size > history.MaxImportSize {
-			msg += fmt.Sprintf(" (warning: %d MiB is over the %d MiB import limit)", size>>20, history.MaxImportSize>>20)
 		}
 		a.postSettings(func() { a.settingsUI.toast = msg })
 	})
@@ -98,17 +89,22 @@ func (a *app) importData() {
 	parent := a.settingsWin
 	limits := a.cfg.Limits()
 	a.async(func() {
-		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		paths, err := a.openDialog(mygo.OpenDialogOptions{
 			Parent:  parent,
 			Title:   "Import clipboard history",
 			Filters: []mygo.FileFilter{{Name: "JSON", Extensions: []string{"json"}}},
 		})
-		if err != nil || len(paths) == 0 {
+		if err != nil {
+			slog.Error("import dialog", "err", err)
+			a.postSettings(func() { a.settingsUI.toast = "Import failed: " + err.Error() })
+			return
+		}
+		if len(paths) == 0 {
 			return
 		}
 		e, s, d, pruned, err := a.importFrom(a.ctx, paths[0], limits)
 		if err != nil {
-			mygo.Dialog.Error("Import failed", err.Error())
+			mygo.Dialog.Error(appName, "Import failed: "+err.Error())
 			return
 		}
 		a.postSettings(func() {
